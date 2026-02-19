@@ -26,15 +26,14 @@ class Config:
     IMPULSE_SIZE_MULTIPLIER: float = float(os.getenv("IMPULSE_SIZE_MULTIPLIER", "1.5"))
     SL_BUFFER: float = float(os.getenv("SL_BUFFER", "0.001"))
 
+    # ── Dry run / paper trading ────────────────────────────────
+    # DRY_RUN=true  → live mainnet data, no wallet needed, trades simulated
+    DRY_RUN: bool = os.getenv("DRY_RUN", "false").lower() == "true"
+    PAPER_BALANCE: float = float(os.getenv("PAPER_BALANCE", "10000.0"))
+
     # ── Candle history ─────────────────────────────────────────
     # How many candles to load for structure analysis
     CANDLE_LIMIT: int = 200
-
-    @property
-    def hl_base_url(self) -> str:
-        if self.HL_TESTNET:
-            return "https://api.hyperliquid-testnet.xyz"
-        return "https://api.hyperliquid.xyz"
 
     def validate(self) -> list[str]:
         """Return list of missing/invalid config values."""
@@ -43,10 +42,12 @@ class Config:
             errors.append("TELEGRAM_BOT_TOKEN is not set")
         if not self.TELEGRAM_CHAT_ID:
             errors.append("TELEGRAM_CHAT_ID is not set")
-        if not self.HL_PRIVATE_KEY:
-            errors.append("HL_PRIVATE_KEY is not set")
-        if not self.HL_WALLET_ADDRESS:
-            errors.append("HL_WALLET_ADDRESS is not set")
+        # Wallet credentials only required when not in dry run mode
+        if not self.DRY_RUN:
+            if not self.HL_PRIVATE_KEY:
+                errors.append("HL_PRIVATE_KEY is not set (set DRY_RUN=true to skip)")
+            if not self.HL_WALLET_ADDRESS:
+                errors.append("HL_WALLET_ADDRESS is not set (set DRY_RUN=true to skip)")
         if self.TIMEFRAME not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h"):
             errors.append(f"TIMEFRAME '{self.TIMEFRAME}' is not valid")
         return errors

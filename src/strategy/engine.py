@@ -83,8 +83,12 @@ class StrategyEngine:
             f"Strategy engine started | pairs={self.config.PAIRS} "
             f"| tf={self.config.TIMEFRAME} | rr_min={self.config.MIN_RR}"
         )
+        mode = "🧪 DRY RUN (paper trading)" if self.client.dry_run else (
+            "⚠️ TESTNET" if self.config.HL_TESTNET else "🔴 MAINNET"
+        )
         await self._alert(
             f"🤖 *Bot started*\n"
+            f"Mode: {mode}\n"
             f"Pairs: {', '.join(self.config.PAIRS)}\n"
             f"Timeframe: {self.config.TIMEFRAME}\n"
             f"Min R:R: {self.config.MIN_RR}"
@@ -210,9 +214,8 @@ class StrategyEngine:
         if success:
             state.in_trade = True
             state.trades_taken += 1
-            await self._alert(
-                f"✅ *Trade Entered — {coin}*\n{setup.summary()}"
-            )
+            label = f"🧪 *Paper Trade — {coin}*" if self.client.dry_run else f"✅ *Trade Entered — {coin}*"
+            await self._alert(f"{label}\n{setup.summary()}")
         else:
             await self._alert(f"❌ *Trade execution failed for {coin}*")
 

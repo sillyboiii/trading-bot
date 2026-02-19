@@ -62,6 +62,8 @@ class TradingBot:
             private_key=self.config.HL_PRIVATE_KEY,
             wallet_address=self.config.HL_WALLET_ADDRESS,
             testnet=self.config.HL_TESTNET,
+            dry_run=self.config.DRY_RUN,
+            paper_balance=self.config.PAPER_BALANCE,
         )
 
         self._app = (
@@ -161,8 +163,13 @@ class TradingBot:
             return
 
         balance = self.client.get_account_balance()
-        net = "TESTNET" if self.config.HL_TESTNET else "MAINNET"
-        await self._reply(update, f"💰 *Balance ({net})*\n`${balance:,.2f} USD`")
+        if self.config.DRY_RUN:
+            label = "DRY RUN (paper)"
+        elif self.config.HL_TESTNET:
+            label = "TESTNET"
+        else:
+            label = "MAINNET"
+        await self._reply(update, f"💰 *Balance ({label})*\n`${balance:,.2f} USD`")
 
     async def _cmd_positions(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorised(update):
@@ -227,10 +234,15 @@ class TradingBot:
             return
 
         cfg = self.config
-        net = "TESTNET ⚠️" if cfg.HL_TESTNET else "MAINNET"
+        if cfg.DRY_RUN:
+            net = f"DRY RUN 🧪 (paper ${cfg.PAPER_BALANCE:,.0f})"
+        elif cfg.HL_TESTNET:
+            net = "TESTNET ⚠️"
+        else:
+            net = "MAINNET"
         text = (
             f"*Current Config*\n"
-            f"Network:     `{net}`\n"
+            f"Mode:        `{net}`\n"
             f"Pairs:       `{', '.join(cfg.PAIRS)}`\n"
             f"Timeframe:   `{cfg.TIMEFRAME}`\n"
             f"Position sz: `{cfg.POSITION_SIZE_PCT * 100:.0f}%`\n"
