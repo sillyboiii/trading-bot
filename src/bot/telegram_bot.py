@@ -257,14 +257,16 @@ class TradingBot:
             return
 
         lines = ["*Backtest Results*\n"]
-        for coin, res in results.items():
-            lines.append(
-                f"*{coin}*\n"
-                f"  Trades:    {res['total_trades']}\n"
-                f"  Win rate:  {res['win_rate']:.1f}%\n"
-                f"  Avg R:R:   {res['avg_rr']:.2f}\n"
-                f"  Rejected:  {res['rejected']} (R:R < {self.config.MIN_RR})\n"
-            )
+        for coin, tf_results in results.items():
+            lines.append(f"*{coin}*")
+            for tf, res in tf_results.items():
+                lines.append(
+                    f"  `{tf}` → trades={res['total_trades']} | "
+                    f"win={res['win_rate']:.1f}% | "
+                    f"avg R:R={res['avg_rr']:.2f} | "
+                    f"rejected={res['rejected']}"
+                )
+            lines.append("")
         await self._reply(update, "\n".join(lines))
 
     async def _cmd_help(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
