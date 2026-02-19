@@ -1,0 +1,52 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+class Config:
+    # ── Telegram ───────────────────────────────────────────────
+    TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
+
+    # ── Hyperliquid ────────────────────────────────────────────
+    HL_PRIVATE_KEY: str = os.getenv("HL_PRIVATE_KEY", "")
+    HL_WALLET_ADDRESS: str = os.getenv("HL_WALLET_ADDRESS", "")
+    HL_TESTNET: bool = os.getenv("HL_TESTNET", "true").lower() == "true"
+
+    # ── Strategy ───────────────────────────────────────────────
+    PAIRS: list[str] = [p.strip() for p in os.getenv("PAIRS", "BTC,ETH,SOL").split(",")]
+    TIMEFRAME: str = os.getenv("TIMEFRAME", "15m")
+    POSITION_SIZE_PCT: float = float(os.getenv("POSITION_SIZE_PCT", "0.10"))
+    MIN_RR: float = float(os.getenv("MIN_RR", "2.5"))
+    PIVOT_LOOKBACK: int = int(os.getenv("PIVOT_LOOKBACK", "5"))
+
+    # ── Zone detection ─────────────────────────────────────────
+    IMPULSE_BODY_RATIO: float = float(os.getenv("IMPULSE_BODY_RATIO", "0.6"))
+    IMPULSE_SIZE_MULTIPLIER: float = float(os.getenv("IMPULSE_SIZE_MULTIPLIER", "1.5"))
+    SL_BUFFER: float = float(os.getenv("SL_BUFFER", "0.001"))
+
+    # ── Candle history ─────────────────────────────────────────
+    # How many candles to load for structure analysis
+    CANDLE_LIMIT: int = 200
+
+    @property
+    def hl_base_url(self) -> str:
+        if self.HL_TESTNET:
+            return "https://api.hyperliquid-testnet.xyz"
+        return "https://api.hyperliquid.xyz"
+
+    def validate(self) -> list[str]:
+        """Return list of missing/invalid config values."""
+        errors = []
+        if not self.TELEGRAM_BOT_TOKEN:
+            errors.append("TELEGRAM_BOT_TOKEN is not set")
+        if not self.TELEGRAM_CHAT_ID:
+            errors.append("TELEGRAM_CHAT_ID is not set")
+        if not self.HL_PRIVATE_KEY:
+            errors.append("HL_PRIVATE_KEY is not set")
+        if not self.HL_WALLET_ADDRESS:
+            errors.append("HL_WALLET_ADDRESS is not set")
+        if self.TIMEFRAME not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h"):
+            errors.append(f"TIMEFRAME '{self.TIMEFRAME}' is not valid")
+        return errors
