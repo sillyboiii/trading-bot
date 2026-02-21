@@ -76,8 +76,10 @@ class Backtester:
                 results[coin][tf] = res
                 logger.info(
                     f"{coin} {tf}: trades={res['total_trades']} "
+                    f"({res['wins']}W/{res['losses']}L/{res['timeouts']}T) "
                     f"winrate={res['win_rate']:.1f}% "
-                    f"avg_rr={res['avg_rr']:.2f} "
+                    f"win_avg_rr={res['avg_win_rr']:.2f} "
+                    f"EV={res['ev_per_trade']:+.3f}R "
                     f"net={res['net_pct']:+.1f}%"
                 )
 
@@ -96,7 +98,8 @@ class Backtester:
         rejected = 0
         wins = 0
         losses = 0
-        rr_values: list[float] = []
+        timeouts = 0
+        win_rr_values: list[float] = []   # R:R of winning trades only
         net_pct = 0.0
         balance = SIM_BALANCE
 
@@ -161,27 +164,35 @@ class Backtester:
 
             if outcome == "win":
                 wins += 1
-                rr_values.append(setup.rr_ratio)
+                win_rr_values.append(setup.rr_ratio)
                 net_pct += self.config.POSITION_SIZE_PCT * setup.rr_ratio * 100
                 balance *= (1 + self.config.POSITION_SIZE_PCT * setup.rr_ratio)
             elif outcome == "loss":
                 losses += 1
-                rr_values.append(-1.0)
                 net_pct -= self.config.POSITION_SIZE_PCT * 100
                 balance *= (1 - self.config.POSITION_SIZE_PCT)
+            else:
+                timeouts += 1
 
             in_trade_until = i + 20  # assume max 20 candles per trade
 
         win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
-        avg_rr = (sum(rr_values) / len(rr_values)) if rr_values else 0.0
+        avg_win_rr = (sum(win_rr_values) / len(win_rr_values)) if win_rr_values else 0.0
+        # Expected value per trade in units of 1R:
+        #   EV = win_rate × avg_win_rr  −  loss_rate × 1.0
+        # Positive EV means the strategy makes money over many trades.
+        loss_rate = losses / total_trades if total_trades > 0 else 0.0
+        ev_per_trade = (win_rate / 100) * avg_win_rr - loss_rate
 
         return {
             "total_trades": total_trades,
             "wins": wins,
             "losses": losses,
+            "timeouts": timeouts,
             "rejected": rejected,
             "win_rate": round(win_rate, 1),
-            "avg_rr": round(avg_rr, 2),
+            "avg_win_rr": round(avg_win_rr, 2),
+            "ev_per_trade": round(ev_per_trade, 3),
             "net_pct": round(net_pct, 2),
         }
 

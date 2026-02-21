@@ -269,15 +269,17 @@ class TradingBot:
             await self._reply(update, "❌ Backtest failed — check logs.")
             return
 
-        lines = ["*Backtest Results*\n"]
+        lines = ["*Backtest Results*", "_win R:R = winners only | EV = expected value per trade_\n"]
         for coin, tf_results in results.items():
             lines.append(f"*{coin}*")
             for tf, res in tf_results.items():
+                icon = "✅" if res['net_pct'] > 0 else "❌"
                 lines.append(
-                    f"  `{tf}` → trades={res['total_trades']} | "
-                    f"win={res['win_rate']:.1f}% | "
-                    f"avg R:R={res['avg_rr']:.2f} | "
-                    f"rejected={res['rejected']}"
+                    f"  {icon} `{tf}` {res['wins']}W/{res['losses']}L "
+                    f"({res['win_rate']:.0f}% win) | "
+                    f"win R:R={res['avg_win_rr']:.2f} | "
+                    f"EV={res['ev_per_trade']:+.3f}R | "
+                    f"net={res['net_pct']:+.1f}%"
                 )
             lines.append("")
         await self._reply(update, "\n".join(lines))

@@ -54,19 +54,24 @@ def run_backtest(config: Config):
     backtester = Backtester(client=client, config=config)
     results = backtester.run()
 
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 72)
     print("  BACKTEST RESULTS — SMA Channel Strategy")
-    print("=" * 60)
+    print("  avg_win_rr = R:R of winners only  |  EV = expected value per trade in R")
+    print("=" * 72)
     for coin, tf_results in results.items():
         print(f"\n  {coin}")
-        print(f"  {'─' * 50}")
+        print(f"  {'─' * 64}")
         for tf, res in tf_results.items():
-            print(f"  {tf:>4s} │ trades={res['total_trades']:>3d} │ "
-                  f"win={res['win_rate']:>5.1f}% │ "
-                  f"avg R:R={res['avg_rr']:>5.2f} │ "
-                  f"rejected={res['rejected']:>3d} │ "
-                  f"net={res['net_pct']:>+7.1f}%")
-    print("=" * 60 + "\n")
+            profitable = "✓" if res['net_pct'] > 0 else "✗"
+            print(
+                f"  {profitable} {tf:>4s} │ "
+                f"trades={res['total_trades']:>3d} ({res['wins']}W/{res['losses']}L/{res['timeouts']}T) │ "
+                f"win={res['win_rate']:>5.1f}% │ "
+                f"win R:R={res['avg_win_rr']:>5.2f} │ "
+                f"EV={res['ev_per_trade']:>+6.3f}R │ "
+                f"net={res['net_pct']:>+7.1f}%"
+            )
+    print("=" * 72 + "\n")
 
 
 def run_bot(config: Config):
