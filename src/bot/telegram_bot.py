@@ -298,22 +298,42 @@ class TradingBot:
             await self._reply(update, "❌ Backtest failed — check logs.")
             return
 
+        from src.backtester.backtest import SIM_BALANCE
+        START = SIM_BALANCE
+
         lines = [
             f"*Backtest Results — {days} days*",
-            "_Compounding on · win R:R = winners only · EV = expected value per trade_\n",
+            "_Compounding on · starting balance $10,000_\n",
         ]
         for coin, tf_results in results.items():
             lines.append(f"*{coin}*")
             for tf, res in tf_results.items():
                 icon = "✅" if res['net_pct'] > 0 else "❌"
                 lines.append(
-                    f"  {icon} `{tf}` {res['wins']}W/{res['losses']}L "
-                    f"({res['win_rate']:.0f}% win) | "
-                    f"win R:R={res['avg_win_rr']:.2f} | "
-                    f"EV={res['ev_per_trade']:+.3f}R | "
-                    f"net={res['net_pct']:+.1f}% → `${res['final_balance']:,.0f}`"
+                    f"  {icon} `{tf}` — {res['total_trades']} trades  "
+                    f"({res['wins']}W / {res['losses']}L / {res['timeouts']} timeout)\n"
+                    f"       WR: {res['win_rate']:.0f}%  |  "
+                    f"Avg win R:R: {res['avg_win_rr']:.2f}  |  "
+                    f"EV: {res['ev_per_trade']:+.3f}R"
                 )
             lines.append("")
+
+        # ── Clear overall summary ──────────────────────────────
+        lines.append("─────────────────────────")
+        lines.append("*Summary*\n")
+        for coin, tf_results in results.items():
+            for tf, res in tf_results.items():
+                pnl_usd = res['final_balance'] - START
+                pnl_pct = res['net_pct']
+                sign = "+" if pnl_usd >= 0 else ""
+                icon = "📈" if pnl_usd >= 0 else "📉"
+                lines.append(
+                    f"{icon} *{coin} {tf}*\n"
+                    f"  Start:  `${START:,.2f}`\n"
+                    f"  End:    `${res['final_balance']:,.2f}`\n"
+                    f"  PnL:    `{sign}${pnl_usd:,.2f}` ({sign}{pnl_pct:.1f}%)\n"
+                )
+
         await self._reply(update, "\n".join(lines))
 
         # Send equity curve chart
