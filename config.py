@@ -36,14 +36,18 @@ class Config:
     # ── Signal filters ─────────────────────────────────────────
     TREND_CONFIRM_CANDLES: int = int(os.getenv("TREND_CONFIRM_CANDLES", "5"))
     PULLBACK_ONLY: bool = os.getenv("PULLBACK_ONLY", "true").lower() == "true"
-    VOLUME_MULT: float = float(os.getenv("VOLUME_MULT", "1.0"))
-    # Macro EMA — only trade in direction of this EMA on the same timeframe.
-    # EMA(72) on 5m ≈ 6 hours of trend. Set to 0 to disable.
-    MACRO_EMA: int = int(os.getenv("MACRO_EMA", "72"))
+    # Volume gate — 0 = disabled, 1.2 = must be 20% above avg. Disabled by
+    # default: added no edge but cut valid setups on 5m charts.
+    VOLUME_MULT: float = float(os.getenv("VOLUME_MULT", "0"))
+    # Macro EMA — 0 = disabled. Disabled by default: caused inverted filtering
+    # on pullback entries (price is naturally below the EMA during the dip).
+    MACRO_EMA: int = int(os.getenv("MACRO_EMA", "0"))
 
     # ── Trade management ───────────────────────────────────────
     # Move SL to entry once price reaches this many R in profit (0 = disabled).
-    BREAKEVEN_AT_R: float = float(os.getenv("BREAKEVEN_AT_R", "1.0"))
+    # Set to 1.5 — at 1.0 the breakeven fired too early, converting wins into
+    # breakevens before the trade had room to reach TP.
+    BREAKEVEN_AT_R: float = float(os.getenv("BREAKEVEN_AT_R", "1.5"))
 
     # ── Circuit breaker ────────────────────────────────────────
     # Pause trading for CIRCUIT_PAUSE_HOURS after either:
