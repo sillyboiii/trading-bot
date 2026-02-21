@@ -182,13 +182,21 @@ class TradingBot:
 
         lines = ["*Open Positions*\n"]
         for p in positions:
-            pnl_sign = "+" if p["unrealized_pnl"] >= 0 else ""
-            lines.append(
+            pnl = p["unrealized_pnl"]
+            pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
+            pnl_icon = "📈" if pnl >= 0 else "📉"
+            block = (
                 f"*{p['coin']}* ({p['side'].upper()})\n"
-                f"  Size:  {p['size']:.6f}\n"
-                f"  Entry: ${p['entry_price']:,.4f}\n"
-                f"  PnL:   {pnl_sign}${p['unrealized_pnl']:,.2f}\n"
+                f"  Entry:   ${p['entry_price']:,.4f}\n"
             )
+            if "current_price" in p:
+                block += f"  Current: ${p['current_price']:,.4f}\n"
+            if "stop_loss" in p:
+                block += f"  SL:      ${p['stop_loss']:,.4f}\n"
+            if "take_profit" in p:
+                block += f"  TP:      ${p['take_profit']:,.4f}\n"
+            block += f"  PnL:     {pnl_icon} {pnl_str}\n"
+            lines.append(block)
         await self._reply(update, "\n".join(lines))
 
     async def _cmd_close(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -207,6 +215,7 @@ class TradingBot:
         if success:
             if self.engine and coin in self.engine.pair_states:
                 self.engine.pair_states[coin].in_trade = False
+                self.engine.pair_states[coin].active_setup = None
             await self._reply(update, f"✅ *{coin}* position closed.")
         else:
             await self._reply(update, f"❌ Failed to close {coin} — check logs.")

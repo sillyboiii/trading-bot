@@ -137,7 +137,16 @@ class HyperliquidClient:
     def get_positions(self) -> list[dict]:
         """Return all open perpetual positions."""
         if self.dry_run:
-            return list(self._paper_positions.values())
+            # Compute live unrealized PnL against current mid price
+            result = []
+            for pos in self._paper_positions.values():
+                price = self.get_current_price(pos["coin"]) or pos["entry_price"]
+                if pos["side"] == "long":
+                    upnl = (price - pos["entry_price"]) * pos["size"]
+                else:
+                    upnl = (pos["entry_price"] - price) * pos["size"]
+                result.append({**pos, "unrealized_pnl": upnl, "current_price": price})
+            return result
 
         try:
             state = self._info.user_state(self.wallet_address)
