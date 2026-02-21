@@ -133,11 +133,15 @@ class MarketStructure:
         prev_close = float(df["close"].iloc[-2]) if len(df) >= 2 else current_close
 
         if state.trend == "bullish":
-            # Breakout long: THIS candle is the first close above recent swing high
+            # Breakout long: THIS candle is the first close above recent swing high.
+            # Quality gate: the swing high must sit within 0.5% of the upper SMA —
+            # this ensures we're breaking out of a channel-level consolidation, not
+            # chasing a trend that has already moved far above the channel.
             if (
                 state.recent_swing_high
                 and prev_close <= state.recent_swing_high.price
                 and current_close > state.recent_swing_high.price
+                and state.recent_swing_high.price <= state.upper_sma * 1.005
             ):
                 state.breakout_long = True
 
@@ -148,11 +152,13 @@ class MarketStructure:
                 state.pullback_long = True
 
         elif state.trend == "bearish":
-            # Breakout short: THIS candle is the first close below recent swing low
+            # Breakout short: THIS candle is the first close below recent swing low.
+            # Quality gate: swing low must be within 0.5% of lower SMA.
             if (
                 state.recent_swing_low
                 and prev_close >= state.recent_swing_low.price
                 and current_close < state.recent_swing_low.price
+                and state.recent_swing_low.price >= state.lower_sma * 0.995
             ):
                 state.breakout_short = True
 
@@ -176,15 +182,17 @@ class MarketStructure:
         trend: str,
     ) -> int:
         """
-        Count how many consecutive prior candles (working backwards from the
-        second-to-last) had their close outside the channel in the given direction.
-        Stops counting as soon as a candle is inside or on the wrong side.
+        Count how many of the last 10 prior candles (excluding current) had
+        their close outside the channel in the given direction.
+        Uses a non-consecutive count so a single pullback candle doesn't
+        reset the entire confirmation.
         """
         if trend == "ranging":
             return 0
 
+        lookback = min(10, len(df) - 1)
         count = 0
-        for i in range(len(df) - 2, max(len(df) - 2 - self.trend_confirm_candles - 1, -1), -1):
+        for i in range(len(df) - 2, len(df) - 2 - lookback, -1):
             if i < 0:
                 break
             c = float(df["close"].iloc[i])
@@ -194,8 +202,6 @@ class MarketStructure:
                 count += 1
             elif trend == "bearish" and c < lo:
                 count += 1
-            else:
-                break  # chain broken
         return count
 
     def _find_recent_swing(
