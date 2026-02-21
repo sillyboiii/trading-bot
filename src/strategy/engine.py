@@ -1,13 +1,16 @@
 """
 Strategy Engine
 ================
-Orchestrates the 3-step trading strategy for all configured pairs:
+Orchestrates the SMA Channel trading strategy for all configured pairs:
 
-  Step 1 → Market structure (trend)
-  Step 2 → Supply / demand zones
-  Step 3 → R:R filter (≥ 2.5 : 1)
+  Step 1 → SMA channel trend determination
+             (close > SMA-High → bullish | close < SMA-Low → bearish)
+  Step 2 → Entry signal detection
+             Type A (Breakout): close breaks above/below recent swing high/low
+             Type B (Pullback): price retraces into channel then closes back out
+  Step 3 → R:R filter (≥ 2.0 : 1)
 
-Runs on a timed loop, firing once per closed candle.
+Runs on a timed loop, firing once per closed 5-minute candle.
 Sends Telegram alerts and executes trades via the exchange client.
 """
 
@@ -22,7 +25,6 @@ import pandas as pd
 from config import Config
 from src.exchange.hyperliquid_client import HyperliquidClient
 from src.strategy.market_structure import MarketStructure, StructureState
-from src.strategy.zones import ZoneDetector, Zone
 from src.strategy.risk_manager import RiskManager, TradeSetup
 
 logger = logging.getLogger(__name__)
@@ -32,17 +34,14 @@ logger = logging.getLogger(__name__)
 class PairState:
     coin: str
     structure: Optional[StructureState] = None
-    active_zones: list = field(default_factory=list)
     last_candle_time: int = 0
     in_trade: bool = False
     trades_taken: int = 0
-    trades_won: int = 0
 
 
 class StrategyEngine:
     """
-    Main engine — runs continuously and evaluates the strategy
-    on every new closed candle.
+    Main engine — evaluates the SMA channel strategy on every new closed candle.
     """
 
     def __init__(
@@ -55,10 +54,9 @@ class StrategyEngine:
         self.client = client
         self.alert_callback = alert_callback
 
-        self.ms_detector = MarketStructure(pivot_lookback=config.PIVOT_LOOKBACK)
-        self.zone_detector = ZoneDetector(
-            impulse_body_ratio=config.IMPULSE_BODY_RATIO,
-            impulse_size_multiplier=config.IMPULSE_SIZE_MULTIPLIER,
+        self.ms_detector = MarketStructure(
+            sma_length=config.SMA_LENGTH,
+            pivot_lookback=config.PIVOT_LOOKBACK,
         )
         self.risk_manager = RiskManager(
             min_rr=config.MIN_RR,
@@ -81,16 +79,18 @@ class StrategyEngine:
         self.running = True
         logger.info(
             f"Strategy engine started | pairs={self.config.PAIRS} "
-            f"| tf={self.config.TIMEFRAME} | rr_min={self.config.MIN_RR}"
+            f"| tf={self.config.TIMEFRAME} | rr_min={self.config.MIN_RR} "
+            f"| sma={self.config.SMA_LENGTH}"
         )
         mode = "🧪 DRY RUN (paper trading)" if self.client.dry_run else (
             "⚠️ TESTNET" if self.config.HL_TESTNET else "🔴 MAINNET"
         )
         await self._alert(
-            f"🤖 *Bot started*\n"
+            f"🤖 *Bot started — SMA Channel Strategy*\n"
             f"Mode: {mode}\n"
             f"Pairs: {', '.join(self.config.PAIRS)}\n"
             f"Timeframe: {self.config.TIMEFRAME}\n"
+            f"SMA Length: {self.config.SMA_LENGTH}\n"
             f"Min R:R: {self.config.MIN_RR}"
         )
         await self._run_loop()
@@ -127,11 +127,11 @@ class StrategyEngine:
 
         # ── Fetch candles ──────────────────────────────────────
         df = self.client.get_candles(coin, self.config.TIMEFRAME, self.config.CANDLE_LIMIT)
-        if df.empty or len(df) < self.config.PIVOT_LOOKBACK * 2 + 5:
+        if df.empty or len(df) < self.config.SMA_LENGTH + self.config.PIVOT_LOOKBACK + 5:
             logger.debug(f"{coin}: insufficient candle data")
             return
 
-        # Work on the CLOSED candle only (drop the last in-progress one)
+        # Work on CLOSED candles only (drop the in-progress candle)
         df = df.iloc[:-1].reset_index(drop=True)
 
         # Deduplicate: skip if we already processed this candle
@@ -140,53 +140,55 @@ class StrategyEngine:
             return
         state.last_candle_time = latest_ts
 
-        # ── Step 1: Market structure ───────────────────────────
+        # ── Step 1 + 2: Trend + Entry signals ─────────────────
         structure = self.ms_detector.analyse(df)
         state.structure = structure
 
         logger.debug(
             f"{coin} | trend={structure.trend} "
-            f"| valid_highs={len(structure.valid_highs)} "
-            f"| valid_lows={len(structure.valid_lows)}"
+            f"| upper_sma={structure.upper_sma:.2f} "
+            f"| lower_sma={structure.lower_sma:.2f} "
+            f"| breakout_long={structure.breakout_long} "
+            f"| pullback_long={structure.pullback_long} "
+            f"| breakout_short={structure.breakout_short} "
+            f"| pullback_short={structure.pullback_short}"
         )
 
         if structure.trend == "ranging":
-            return  # No trades in ranging markets
+            return  # No trades inside the channel
 
-        # ── Step 2: Supply / demand zones ─────────────────────
-        zones = self.zone_detector.get_active_zones(df, structure.trend)
-        state.active_zones = zones
+        # Determine side and whether any entry signal is active
+        if structure.trend == "bullish" and structure.has_long_signal:
+            side = "long"
+            signal_type = "breakout" if structure.breakout_long else "pullback"
+        elif structure.trend == "bearish" and structure.has_short_signal:
+            side = "short"
+            signal_type = "breakout" if structure.breakout_short else "pullback"
+        else:
+            return  # No signal this candle
 
-        if not zones:
-            logger.debug(f"{coin}: no active zones in trend direction")
+        # Skip if already in a trade for this coin
+        if state.in_trade or self.client.has_open_position(coin):
+            logger.debug(f"{coin}: already in trade, skipping signal")
             return
 
-        # ── Check if price is in a zone ────────────────────────
         current_price = self.client.get_current_price(coin)
         if not current_price:
             return
 
-        touched_zone = self.zone_detector.price_in_zone(current_price, zones)
-        if not touched_zone:
-            return
-
-        # Skip if already in a trade for this coin
-        if state.in_trade or self.client.has_open_position(coin):
-            logger.debug(f"{coin}: already in trade, skipping zone signal")
-            return
-
         # ── Step 3: R:R filter ─────────────────────────────────
-        side = "long" if structure.trend == "bullish" else "short"
         balance = self.client.get_account_balance()
 
         setup = self.risk_manager.evaluate(
             coin=coin,
             side=side,
             current_price=current_price,
-            zone=touched_zone,
-            last_valid_high=structure.last_valid_high,
-            last_valid_low=structure.last_valid_low,
+            upper_sma=structure.upper_sma,
+            lower_sma=structure.lower_sma,
+            recent_swing_high=structure.recent_swing_high,
+            recent_swing_low=structure.recent_swing_low,
             account_balance=balance,
+            signal_type=signal_type,
         )
 
         if setup is None:
@@ -198,7 +200,9 @@ class StrategyEngine:
         )
 
         if not setup.approved:
-            logger.info(f"{coin}: R:R {setup.rr_ratio} < {self.config.MIN_RR} — trade rejected")
+            logger.info(
+                f"{coin}: R:R {setup.rr_ratio} < {self.config.MIN_RR} — trade rejected"
+            )
             return
 
         # ── Execute trade ──────────────────────────────────────
@@ -214,7 +218,11 @@ class StrategyEngine:
         if success:
             state.in_trade = True
             state.trades_taken += 1
-            label = f"🧪 *Paper Trade — {coin}*" if self.client.dry_run else f"✅ *Trade Entered — {coin}*"
+            label = (
+                f"🧪 *Paper Trade — {coin}*"
+                if self.client.dry_run
+                else f"✅ *Trade Entered — {coin}*"
+            )
             await self._alert(f"{label}\n{setup.summary()}")
         else:
             await self._alert(f"❌ *Trade execution failed for {coin}*")
@@ -224,13 +232,28 @@ class StrategyEngine:
     # ──────────────────────────────────────────────────────────
 
     def get_status_text(self) -> str:
-        lines = ["*Strategy Status*\n"]
+        lines = ["*SMA Channel Strategy Status*\n"]
         for coin, state in self.pair_states.items():
-            trend = state.structure.trend if state.structure else "unknown"
-            zones = len(state.active_zones)
+            if state.structure:
+                trend = state.structure.trend
+                upper = f"{state.structure.upper_sma:.2f}"
+                lower = f"{state.structure.lower_sma:.2f}"
+                signals = []
+                if state.structure.breakout_long:
+                    signals.append("BO-Long")
+                if state.structure.pullback_long:
+                    signals.append("PB-Long")
+                if state.structure.breakout_short:
+                    signals.append("BO-Short")
+                if state.structure.pullback_short:
+                    signals.append("PB-Short")
+                sig_str = ", ".join(signals) if signals else "none"
+            else:
+                trend, upper, lower, sig_str = "unknown", "-", "-", "none"
+
             lines.append(
-                f"*{coin}*: trend=`{trend}` | zones={zones} | "
-                f"trades={state.trades_taken}"
+                f"*{coin}*: trend=`{trend}` | sma=[{lower}–{upper}] | "
+                f"signal={sig_str} | trades={state.trades_taken}"
             )
         return "\n".join(lines)
 
@@ -257,4 +280,4 @@ class StrategyEngine:
             "1m": 60, "3m": 180, "5m": 300, "15m": 900,
             "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400,
         }
-        return mapping.get(tf, 900)
+        return mapping.get(tf, 300)

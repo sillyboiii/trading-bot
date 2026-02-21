@@ -1,14 +1,18 @@
 """
-Backtester
-==========
-Runs the full 3-step strategy on historical candles for each pair
-and reports key performance metrics:
+Backtester — SMA Channel Strategy
+===================================
+Walk-forward simulation of the full strategy on historical candles.
 
-  - Total trades taken
-  - Trades rejected (R:R < MIN_RR)
-  - Win rate  (trade reached TP before SL)
+At each closed candle the engine checks:
+  1. SMA channel trend (SMA-High / SMA-Low)
+  2. Entry signal (breakout or pullback)
+  3. R:R filter (>= 2.0 : 1)
+
+Performance metrics reported:
+  - Total trades taken / rejected
+  - Win rate  (price reached TP before SL)
   - Average realised R:R
-  - Net return (% of account)
+  - Net return (% of simulated account)
 
 No actual orders are placed — simulation only.
 """
@@ -21,15 +25,11 @@ import pandas as pd
 from config import Config
 from src.exchange.hyperliquid_client import HyperliquidClient
 from src.strategy.market_structure import MarketStructure
-from src.strategy.zones import ZoneDetector
 from src.strategy.risk_manager import RiskManager
 
 logger = logging.getLogger(__name__)
 
-# Backtest uses this many candles of history
 BACKTEST_CANDLE_LIMIT = 500
-
-# Simulated starting balance for metric calculations
 SIM_BALANCE = 10_000.0
 
 
@@ -38,10 +38,9 @@ class Backtester:
         self.client = client
         self.config = config
 
-        self.ms = MarketStructure(pivot_lookback=config.PIVOT_LOOKBACK)
-        self.zones = ZoneDetector(
-            impulse_body_ratio=config.IMPULSE_BODY_RATIO,
-            impulse_size_multiplier=config.IMPULSE_SIZE_MULTIPLIER,
+        self.ms = MarketStructure(
+            sma_length=config.SMA_LENGTH,
+            pivot_lookback=config.PIVOT_LOOKBACK,
         )
         self.risk = RiskManager(
             min_rr=config.MIN_RR,
@@ -55,16 +54,14 @@ class Backtester:
 
     def run(self) -> dict:
         """
-        Run backtest for all configured pairs and timeframes.
-        Returns a dict keyed by coin with result dicts.
+        Run backtest for all configured pairs.
+        Compares 5m vs 15m when on either of those timeframes.
+        Returns dict keyed by coin with result dicts.
         """
         results = {}
         timeframes = [self.config.TIMEFRAME]
 
-        # Also compare 5m vs 15m if user is on one of them
-        if self.config.TIMEFRAME == "15m":
-            timeframes = ["5m", "15m"]
-        elif self.config.TIMEFRAME == "5m":
+        if self.config.TIMEFRAME in ("5m", "15m"):
             timeframes = ["5m", "15m"]
 
         for coin in self.config.PAIRS:
@@ -80,7 +77,8 @@ class Backtester:
                 logger.info(
                     f"{coin} {tf}: trades={res['total_trades']} "
                     f"winrate={res['win_rate']:.1f}% "
-                    f"avg_rr={res['avg_rr']:.2f}"
+                    f"avg_rr={res['avg_rr']:.2f} "
+                    f"net={res['net_pct']:+.1f}%"
                 )
 
         return results
@@ -91,10 +89,8 @@ class Backtester:
 
     def _backtest_pair(self, coin: str, df: pd.DataFrame) -> dict:
         """
-        Walk-forward simulation:
-        At each candle, re-run the strategy on all data up to that
-        point (excluding the current candle) and check for entry.
-        Then simulate the trade outcome on subsequent candles.
+        Walk-forward simulation: at each candle, re-run strategy on all
+        prior data, check for an entry signal, then simulate the outcome.
         """
         total_trades = 0
         rejected = 0
@@ -104,45 +100,45 @@ class Backtester:
         net_pct = 0.0
         balance = SIM_BALANCE
 
-        # Start from enough history for the strategy to have data
-        min_start = self.config.PIVOT_LOOKBACK * 4 + 20
-        # Track which candle the current simulated trade started at
+        min_start = self.config.SMA_LENGTH + self.config.PIVOT_LOOKBACK + 5
         in_trade_until: Optional[int] = None
 
         for i in range(min_start, len(df) - 1):
             if in_trade_until is not None and i <= in_trade_until:
-                continue  # Still in a simulated trade
+                continue
 
             # Data available up to and including candle i-1 (closed)
             window = df.iloc[:i].copy().reset_index(drop=True)
 
-            # Step 1: structure
+            # Step 1 + 2: trend + signal
             structure = self.ms.analyse(window)
+
             if structure.trend == "ranging":
                 continue
 
-            # Step 2: zones
-            active_zones = self.zones.get_active_zones(window, structure.trend)
-            if not active_zones:
+            if structure.trend == "bullish" and structure.has_long_signal:
+                side = "long"
+                signal_type = "breakout" if structure.breakout_long else "pullback"
+            elif structure.trend == "bearish" and structure.has_short_signal:
+                side = "short"
+                signal_type = "breakout" if structure.breakout_short else "pullback"
+            else:
                 continue
 
-            # Step 3: check if price at open of candle i touches a zone
-            candle = df.iloc[i]
-            entry_price = float(candle["open"])
+            # Entry at open of the next candle
+            entry_price = float(df["open"].iloc[i])
 
-            touched = self.zones.price_in_zone(entry_price, active_zones)
-            if not touched:
-                continue
-
-            side = "long" if structure.trend == "bullish" else "short"
+            # Step 3: R:R
             setup = self.risk.evaluate(
                 coin=coin,
                 side=side,
                 current_price=entry_price,
-                zone=touched,
-                last_valid_high=structure.last_valid_high,
-                last_valid_low=structure.last_valid_low,
+                upper_sma=structure.upper_sma,
+                lower_sma=structure.lower_sma,
+                recent_swing_high=structure.recent_swing_high,
+                recent_swing_low=structure.recent_swing_low,
                 account_balance=balance,
+                signal_type=signal_type,
             )
 
             if setup is None:
@@ -154,21 +150,21 @@ class Backtester:
 
             total_trades += 1
 
-            # Simulate trade outcome on future candles
+            # Simulate outcome on subsequent candles
             outcome = self._simulate_outcome(df, i + 1, setup)
 
             if outcome == "win":
                 wins += 1
                 rr_values.append(setup.rr_ratio)
-                pnl = setup.position_size_usd * setup.rr_ratio * self.config.POSITION_SIZE_PCT
                 net_pct += self.config.POSITION_SIZE_PCT * setup.rr_ratio * 100
+                balance *= (1 + self.config.POSITION_SIZE_PCT * setup.rr_ratio)
             elif outcome == "loss":
                 losses += 1
                 rr_values.append(-1.0)
                 net_pct -= self.config.POSITION_SIZE_PCT * 100
+                balance *= (1 - self.config.POSITION_SIZE_PCT)
 
-            # Estimate how long trade lasted (crude: assume 10 candles max)
-            in_trade_until = i + 20
+            in_trade_until = i + 20  # assume max 20 candles per trade
 
         win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
         avg_rr = (sum(rr_values) / len(rr_values)) if rr_values else 0.0
@@ -192,7 +188,7 @@ class Backtester:
     ) -> str:
         """
         Walk forward from start_idx and return 'win', 'loss', or 'timeout'.
-        A win is when price touches TP before SL.
+        Win = price reaches TP before SL.
         """
         for i in range(start_idx, min(start_idx + max_candles, len(df))):
             high = float(df["high"].iloc[i])

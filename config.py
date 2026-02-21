@@ -16,14 +16,14 @@ class Config:
 
     # ── Strategy ───────────────────────────────────────────────
     PAIRS: list[str] = [p.strip() for p in os.getenv("PAIRS", "BTC,ETH,SOL").split(",")]
-    TIMEFRAME: str = os.getenv("TIMEFRAME", "15m")
+    TIMEFRAME: str = os.getenv("TIMEFRAME", "5m")
     POSITION_SIZE_PCT: float = float(os.getenv("POSITION_SIZE_PCT", "0.10"))
-    MIN_RR: float = float(os.getenv("MIN_RR", "2.5"))
+    MIN_RR: float = float(os.getenv("MIN_RR", "2.0"))
     PIVOT_LOOKBACK: int = int(os.getenv("PIVOT_LOOKBACK", "5"))
 
-    # ── Zone detection ─────────────────────────────────────────
-    IMPULSE_BODY_RATIO: float = float(os.getenv("IMPULSE_BODY_RATIO", "0.6"))
-    IMPULSE_SIZE_MULTIPLIER: float = float(os.getenv("IMPULSE_SIZE_MULTIPLIER", "1.5"))
+    # ── SMA Channel ────────────────────────────────────────────
+    # SMA_LENGTH controls both SMA(High) and SMA(Low) for the price channel
+    SMA_LENGTH: int = int(os.getenv("SMA_LENGTH", "20"))
     SL_BUFFER: float = float(os.getenv("SL_BUFFER", "0.001"))
 
     # ── Dry run / paper trading ────────────────────────────────
