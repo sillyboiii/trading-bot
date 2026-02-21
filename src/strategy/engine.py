@@ -58,11 +58,18 @@ class StrategyEngine:
         self.ms_detector = MarketStructure(
             sma_length=config.SMA_LENGTH,
             pivot_lookback=config.PIVOT_LOOKBACK,
+            trend_confirm_candles=config.TREND_CONFIRM_CANDLES,
+            atr_length=config.ATR_LENGTH,
+            pullback_only=config.PULLBACK_ONLY,
+            volume_mult=config.VOLUME_MULT,
         )
         self.risk_manager = RiskManager(
             min_rr=config.MIN_RR,
             position_size_pct=config.POSITION_SIZE_PCT,
             sl_buffer=config.SL_BUFFER,
+            atr_sl_mult=config.ATR_SL_MULT,
+            risk_per_trade_pct=config.RISK_PER_TRADE_PCT,
+            max_position_pct=config.MAX_POSITION_PCT,
         )
 
         self.pair_states: dict[str, PairState] = {
@@ -201,6 +208,7 @@ class StrategyEngine:
             signal_type=signal_type,
             signal_candle_low=signal_candle_low,
             signal_candle_high=signal_candle_high,
+            atr=structure.atr,
         )
 
         if setup is None:

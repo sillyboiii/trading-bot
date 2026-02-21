@@ -17,14 +17,30 @@ class Config:
     # ── Strategy ───────────────────────────────────────────────
     PAIRS: list[str] = [p.strip() for p in os.getenv("PAIRS", "BTC,ETH,SOL").split(",")]
     TIMEFRAME: str = os.getenv("TIMEFRAME", "5m")
-    POSITION_SIZE_PCT: float = float(os.getenv("POSITION_SIZE_PCT", "0.10"))
-    MIN_RR: float = float(os.getenv("MIN_RR", "2.0"))
+    POSITION_SIZE_PCT: float = float(os.getenv("POSITION_SIZE_PCT", "0.10"))  # legacy fallback
+    RISK_PER_TRADE_PCT: float = float(os.getenv("RISK_PER_TRADE_PCT", "0.01"))  # 1% balance at risk per trade
+    MAX_POSITION_PCT: float = float(os.getenv("MAX_POSITION_PCT", "0.25"))    # cap at 25% of balance
+    MIN_RR: float = float(os.getenv("MIN_RR", "2.5"))
     PIVOT_LOOKBACK: int = int(os.getenv("PIVOT_LOOKBACK", "10"))
 
     # ── SMA Channel ────────────────────────────────────────────
-    # SMA_LENGTH controls both SMA(High) and SMA(Low) for the price channel
     SMA_LENGTH: int = int(os.getenv("SMA_LENGTH", "20"))
     SL_BUFFER: float = float(os.getenv("SL_BUFFER", "0.001"))
+
+    # ── ATR-based stop loss ────────────────────────────────────
+    # SL is placed ATR_SL_MULT × ATR(ATR_LENGTH) from entry.
+    # Adapts to actual volatility — stops won't get hit by normal candle noise.
+    ATR_LENGTH: int = int(os.getenv("ATR_LENGTH", "14"))
+    ATR_SL_MULT: float = float(os.getenv("ATR_SL_MULT", "1.5"))
+
+    # ── Signal filters ─────────────────────────────────────────
+    # Require this many of the last 10 candles to be outside the channel
+    # before a signal is considered tradeable.
+    TREND_CONFIRM_CANDLES: int = int(os.getenv("TREND_CONFIRM_CANDLES", "5"))
+    # When true, only pullback entries are taken (no breakout-chasing).
+    PULLBACK_ONLY: bool = os.getenv("PULLBACK_ONLY", "true").lower() == "true"
+    # Signal candle volume must be >= VOLUME_MULT × 20-period avg volume.
+    VOLUME_MULT: float = float(os.getenv("VOLUME_MULT", "1.2"))
 
     # ── Dry run / paper trading ────────────────────────────────
     # DRY_RUN=true  → live mainnet data, no wallet needed, trades simulated

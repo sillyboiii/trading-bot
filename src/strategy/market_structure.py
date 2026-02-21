@@ -10,16 +10,21 @@ Trend rules:
   Bearish : close < lower SMA  → look for SHORTS only
   Ranging : close inside channel → no new trades
 
-Entry signals (evaluated per closed candle):
-  Breakout Long   : bullish trend + close > recent swing high
-  Pullback Long   : bullish trend + price was in channel recently
-                    + now closed back above upper SMA
-  Breakout Short  : bearish trend + close < recent swing low
-  Pullback Short  : bearish trend + price was in channel recently
-                    + now closed back below lower SMA
+Entry signals:
+  Pullback Long  : price briefly pulled into the channel, current candle
+                   closes back above upper SMA with bullish body + volume.
+  Pullback Short : price briefly pulled into channel, current candle
+                   closes back below lower SMA with bearish body + volume.
+  Breakout Long  : (optional) close breaks above recent swing high near channel.
+  Breakout Short : (optional) close breaks below recent swing low near channel.
+
+Additional filters (all must pass before a signal fires):
+  - Trend confirmation  : ≥ TREND_CONFIRM_CANDLES of last 10 closes outside channel
+  - SMA slope           : channel must be sloping in the trade direction
+  - Volume              : signal candle volume ≥ VOLUME_MULT × 20-period avg volume
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import pandas as pd
@@ -38,6 +43,8 @@ class StructureState:
     trend: str = "ranging"          # 'bullish' | 'bearish' | 'ranging'
     upper_sma: float = 0.0          # SMA(length) of highs
     lower_sma: float = 0.0          # SMA(length) of lows
+    atr: float = 0.0                # ATR(atr_length) — used for SL sizing
+    sma_slope: float = 0.0          # fractional slope of the channel midpoint
     recent_swing_high: Optional[SwingPoint] = None
     recent_swing_low: Optional[SwingPoint] = None
     breakout_long: bool = False
@@ -65,20 +72,27 @@ class StructureState:
 
 class MarketStructure:
     """
-    SMA channel-based trend and signal detector.
+    SMA channel-based trend and signal detector with ATR, slope, and volume filters.
     """
 
     def __init__(
         self,
         sma_length: int = 20,
         pivot_lookback: int = 10,
-        trend_confirm_candles: int = 3,
+        trend_confirm_candles: int = 5,
+        atr_length: int = 14,
+        pullback_only: bool = True,
+        volume_mult: float = 1.2,
+        slope_candles: int = 5,
     ):
         self.sma_length = sma_length
         self.pivot_lookback = pivot_lookback
-        # How many consecutive candles must be outside the channel before
-        # we consider the trend established enough to trade.
         self.trend_confirm_candles = trend_confirm_candles
+        self.atr_length = atr_length
+        self.pullback_only = pullback_only
+        self.volume_mult = volume_mult
+        # How many candles back to measure slope (shorter = more responsive)
+        self.slope_candles = slope_candles
 
     # ──────────────────────────────────────────────────────────
     # Public API
@@ -110,6 +124,13 @@ class MarketStructure:
         state.upper_sma = float(upper_sma.iloc[-1])
         state.lower_sma = float(lower_sma.iloc[-1])
 
+        # ── ATR ────────────────────────────────────────────────
+        state.atr = self._calc_atr(df)
+
+        # ── Channel midpoint slope ─────────────────────────────
+        # Positive slope = channel moving up (bullish bias), negative = down.
+        state.sma_slope = self._calc_slope(upper_sma, lower_sma)
+
         # ── Step 1: Trend ──────────────────────────────────────
         if current_close > state.upper_sma:
             state.trend = "bullish"
@@ -122,68 +143,123 @@ class MarketStructure:
         state.recent_swing_high = self._find_recent_swing(df, "high")
         state.recent_swing_low = self._find_recent_swing(df, "low")
 
-        # ── Trend confirmation: skip signals until trend is established ───────
-        # Count how many of the last N candles (excluding current) were outside
-        # the channel in the trend direction.
+        # ── Trend confirmation ─────────────────────────────────
         n_confirm = self._count_trend_candles(df, upper_sma, lower_sma, state.trend)
         if n_confirm < self.trend_confirm_candles:
             return state  # trend too fresh — no signal yet
 
-        # ── Entry signals (edge-triggered — fire only on the crossover candle) ──
+        # ── Slope filter — channel must be moving in our direction ─
+        # Longs: channel midpoint must be sloping up (> 0)
+        # Shorts: channel midpoint must be sloping down (< 0)
+        # Using a small threshold to ignore flat/sideways channels.
+        slope_threshold = 0.0002  # 0.02% per slope_candles interval
+        if state.trend == "bullish" and state.sma_slope < slope_threshold:
+            return state  # flat channel — skip
+        if state.trend == "bearish" and state.sma_slope > -slope_threshold:
+            return state  # flat channel — skip
+
+        # ── Volume filter ──────────────────────────────────────
+        vol_ok = self._check_volume(df)
+
+        # ── Entry signals ──────────────────────────────────────
         prev_close = float(df["close"].iloc[-2]) if len(df) >= 2 else current_close
         current_open = float(df["open"].iloc[-1])
 
         if state.trend == "bullish":
-            # Breakout long: THIS candle is the first close above recent swing high.
-            # Quality gate: the swing high must sit within 0.5% of the upper SMA —
-            # this ensures we're breaking out of a channel-level consolidation, not
-            # chasing a trend that has already moved far above the channel.
-            if (
-                state.recent_swing_high
-                and prev_close <= state.recent_swing_high.price
-                and current_close > state.recent_swing_high.price
-                and state.recent_swing_high.price <= state.upper_sma * 1.005
-            ):
-                state.breakout_long = True
-
             # Pullback long: previous candle was inside/below channel,
             # current candle is the first close back above upper SMA.
-            # Candle must be bullish (close > open) to confirm rejection momentum.
+            # Body must be bullish. Volume must be above average.
             prev_upper = float(upper_sma.iloc[-2]) if len(upper_sma) >= 2 else state.upper_sma
             if (
                 prev_close <= prev_upper
                 and current_close > state.upper_sma
-                and current_close > current_open  # bullish close = conviction
+                and current_close > current_open   # bullish body = conviction
+                and vol_ok
             ):
                 state.pullback_long = True
 
-        elif state.trend == "bearish":
-            # Breakout short: THIS candle is the first close below recent swing low.
-            # Quality gate: swing low must be within 0.5% of lower SMA.
-            if (
-                state.recent_swing_low
-                and prev_close >= state.recent_swing_low.price
-                and current_close < state.recent_swing_low.price
-                and state.recent_swing_low.price >= state.lower_sma * 0.995
-            ):
-                state.breakout_short = True
+            # Breakout long (disabled by default — prone to fakeouts on 5m)
+            if not self.pullback_only:
+                if (
+                    state.recent_swing_high
+                    and prev_close <= state.recent_swing_high.price
+                    and current_close > state.recent_swing_high.price
+                    and state.recent_swing_high.price <= state.upper_sma * 1.005
+                    and vol_ok
+                ):
+                    state.breakout_long = True
 
+        elif state.trend == "bearish":
             # Pullback short: previous candle was inside/above channel,
             # current candle is the first close back below lower SMA.
-            # Candle must be bearish (close < open) to confirm rejection momentum.
+            # Body must be bearish. Volume must be above average.
             prev_lower = float(lower_sma.iloc[-2]) if len(lower_sma) >= 2 else state.lower_sma
             if (
                 prev_close >= prev_lower
                 and current_close < state.lower_sma
-                and current_close < current_open  # bearish close = conviction
+                and current_close < current_open   # bearish body = conviction
+                and vol_ok
             ):
                 state.pullback_short = True
+
+            # Breakout short (disabled by default)
+            if not self.pullback_only:
+                if (
+                    state.recent_swing_low
+                    and prev_close >= state.recent_swing_low.price
+                    and current_close < state.recent_swing_low.price
+                    and state.recent_swing_low.price >= state.lower_sma * 0.995
+                    and vol_ok
+                ):
+                    state.breakout_short = True
 
         return state
 
     # ──────────────────────────────────────────────────────────
     # Internal helpers
     # ──────────────────────────────────────────────────────────
+
+    def _calc_atr(self, df: pd.DataFrame) -> float:
+        """True Range → ATR(atr_length) using Wilder's smoothing (EWM)."""
+        if len(df) < self.atr_length + 1:
+            return 0.0
+        high = df["high"]
+        low = df["low"]
+        prev_close = df["close"].shift(1)
+        tr = pd.concat([
+            high - low,
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ], axis=1).max(axis=1)
+        # Wilder's smoothing: equivalent to EWM with alpha = 1/atr_length
+        atr = tr.ewm(alpha=1 / self.atr_length, min_periods=self.atr_length).mean()
+        return float(atr.iloc[-1])
+
+    def _calc_slope(self, upper_sma: pd.Series, lower_sma: pd.Series) -> float:
+        """
+        Fractional slope of the channel midpoint over the last slope_candles bars.
+        Positive = rising, negative = falling.
+        """
+        n = self.slope_candles
+        if len(upper_sma) < n + 1:
+            return 0.0
+        mid_now = (upper_sma.iloc[-1] + lower_sma.iloc[-1]) / 2
+        mid_prev = (upper_sma.iloc[-1 - n] + lower_sma.iloc[-1 - n]) / 2
+        if mid_prev == 0:
+            return 0.0
+        return (mid_now - mid_prev) / mid_prev
+
+    def _check_volume(self, df: pd.DataFrame) -> bool:
+        """
+        Return True if the last candle's volume exceeds volume_mult × 20-period avg.
+        Falls back to True if no volume column or insufficient data.
+        """
+        if "volume" not in df.columns or len(df) < 21:
+            return True
+        avg_vol = float(df["volume"].iloc[-21:-1].mean())
+        if avg_vol <= 0:
+            return True
+        return float(df["volume"].iloc[-1]) >= self.volume_mult * avg_vol
 
     def _count_trend_candles(
         self,
@@ -195,8 +271,7 @@ class MarketStructure:
         """
         Count how many of the last 10 prior candles (excluding current) had
         their close outside the channel in the given direction.
-        Uses a non-consecutive count so a single pullback candle doesn't
-        reset the entire confirmation.
+        Non-consecutive — a single pullback candle does not reset the count.
         """
         if trend == "ranging":
             return 0
@@ -237,4 +312,3 @@ class MarketStructure:
                     kind=kind,
                 )
         return None
-

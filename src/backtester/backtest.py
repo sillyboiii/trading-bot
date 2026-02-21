@@ -57,11 +57,18 @@ class Backtester:
         self.ms = MarketStructure(
             sma_length=config.SMA_LENGTH,
             pivot_lookback=config.PIVOT_LOOKBACK,
+            trend_confirm_candles=config.TREND_CONFIRM_CANDLES,
+            atr_length=config.ATR_LENGTH,
+            pullback_only=config.PULLBACK_ONLY,
+            volume_mult=config.VOLUME_MULT,
         )
         self.risk = RiskManager(
             min_rr=config.MIN_RR,
             position_size_pct=config.POSITION_SIZE_PCT,
             sl_buffer=config.SL_BUFFER,
+            atr_sl_mult=config.ATR_SL_MULT,
+            risk_per_trade_pct=config.RISK_PER_TRADE_PCT,
+            max_position_pct=config.MAX_POSITION_PCT,
         )
 
     # ──────────────────────────────────────────────────────────
@@ -169,6 +176,7 @@ class Backtester:
                 signal_type=signal_type,
                 signal_candle_low=signal_candle_low,
                 signal_candle_high=signal_candle_high,
+                atr=structure.atr,
             )
 
             if setup is None:
@@ -183,15 +191,16 @@ class Backtester:
             # Simulate outcome on subsequent candles
             outcome = self._simulate_outcome(df, i + 1, setup)
 
+            r = self.config.RISK_PER_TRADE_PCT  # fraction of balance risked
             if outcome == "win":
                 wins += 1
                 win_rr_values.append(setup.rr_ratio)
-                net_pct += self.config.POSITION_SIZE_PCT * setup.rr_ratio * 100
-                balance *= (1 + self.config.POSITION_SIZE_PCT * setup.rr_ratio)
+                net_pct += r * setup.rr_ratio * 100
+                balance *= (1 + r * setup.rr_ratio)
             elif outcome == "loss":
                 losses += 1
-                net_pct -= self.config.POSITION_SIZE_PCT * 100
-                balance *= (1 - self.config.POSITION_SIZE_PCT)
+                net_pct -= r * 100
+                balance *= (1 - r)
             else:
                 timeouts += 1
 
