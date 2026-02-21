@@ -61,6 +61,7 @@ class Backtester:
             atr_length=config.ATR_LENGTH,
             pullback_only=config.PULLBACK_ONLY,
             volume_mult=config.VOLUME_MULT,
+            macro_ema_period=config.MACRO_EMA,
         )
         self.risk = RiskManager(
             min_rr=config.MIN_RR,
@@ -128,6 +129,7 @@ class Backtester:
         wins = 0
         losses = 0
         timeouts = 0
+        breakevens = 0
         win_rr_values: list[float] = []   # R:R of winning trades only
         net_pct = 0.0
         balance = SIM_BALANCE
@@ -201,6 +203,8 @@ class Backtester:
                 losses += 1
                 net_pct -= r * 100
                 balance *= (1 - r)
+            elif outcome == "breakeven":
+                breakevens += 1  # balance unchanged
             else:
                 timeouts += 1
 
@@ -219,6 +223,7 @@ class Backtester:
             "wins": wins,
             "losses": losses,
             "timeouts": timeouts,
+            "breakevens": breakevens,
             "rejected": rejected,
             "win_rate": round(win_rate, 1),
             "avg_win_rr": round(avg_win_rr, 2),
@@ -236,21 +241,39 @@ class Backtester:
         max_candles: int = 50,
     ) -> str:
         """
-        Walk forward from start_idx and return 'win', 'loss', or 'timeout'.
-        Win = price reaches TP before SL.
+        Walk forward from start_idx and return 'win', 'loss', 'breakeven', or 'timeout'.
+
+        Breakeven logic (mirrors live engine):
+          Once price reaches entry + BREAKEVEN_AT_R × risk (long) or
+          entry - BREAKEVEN_AT_R × risk (short), SL is moved to entry.
+          If price then reverses to entry, the trade closes at breakeven.
         """
+        be_r = self.config.BREAKEVEN_AT_R
+        risk = abs(setup.entry - setup.stop_loss)
+        effective_sl = setup.stop_loss
+        breakeven_activated = False
+
         for i in range(start_idx, min(start_idx + max_candles, len(df))):
             high = float(df["high"].iloc[i])
             low = float(df["low"].iloc[i])
 
+            # Check for breakeven activation
+            if be_r > 0 and not breakeven_activated:
+                if setup.side == "long" and high >= setup.entry + be_r * risk:
+                    effective_sl = setup.entry
+                    breakeven_activated = True
+                elif setup.side == "short" and low <= setup.entry - be_r * risk:
+                    effective_sl = setup.entry
+                    breakeven_activated = True
+
             if setup.side == "long":
-                if low <= setup.stop_loss:
-                    return "loss"
+                if low <= effective_sl:
+                    return "breakeven" if breakeven_activated else "loss"
                 if high >= setup.take_profit:
                     return "win"
             else:
-                if high >= setup.stop_loss:
-                    return "loss"
+                if high >= effective_sl:
+                    return "breakeven" if breakeven_activated else "loss"
                 if low <= setup.take_profit:
                     return "win"
 

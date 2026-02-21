@@ -45,6 +45,7 @@ class StructureState:
     lower_sma: float = 0.0          # SMA(length) of lows
     atr: float = 0.0                # ATR(atr_length) — used for SL sizing
     sma_slope: float = 0.0          # fractional slope of the channel midpoint
+    macro_ema: float = 0.0          # EMA(macro_ema_period) — 6h macro trend
     recent_swing_high: Optional[SwingPoint] = None
     recent_swing_low: Optional[SwingPoint] = None
     breakout_long: bool = False
@@ -84,6 +85,7 @@ class MarketStructure:
         pullback_only: bool = True,
         volume_mult: float = 1.2,
         slope_candles: int = 5,
+        macro_ema_period: int = 72,
     ):
         self.sma_length = sma_length
         self.pivot_lookback = pivot_lookback
@@ -91,8 +93,9 @@ class MarketStructure:
         self.atr_length = atr_length
         self.pullback_only = pullback_only
         self.volume_mult = volume_mult
-        # How many candles back to measure slope (shorter = more responsive)
         self.slope_candles = slope_candles
+        # 0 = disabled; 72 on 5m ≈ 6h trend filter
+        self.macro_ema_period = macro_ema_period
 
     # ──────────────────────────────────────────────────────────
     # Public API
@@ -127,6 +130,13 @@ class MarketStructure:
         # ── ATR ────────────────────────────────────────────────
         state.atr = self._calc_atr(df)
 
+        # ── Macro EMA ──────────────────────────────────────────
+        # EMA(72) on 5m ≈ 6h trend. Signals are only taken in its direction.
+        if self.macro_ema_period > 0 and len(df) >= self.macro_ema_period:
+            state.macro_ema = float(
+                df["close"].ewm(span=self.macro_ema_period, adjust=False).mean().iloc[-1]
+            )
+
         # ── Channel midpoint slope ─────────────────────────────
         # Positive slope = channel moving up (bullish bias), negative = down.
         state.sma_slope = self._calc_slope(upper_sma, lower_sma)
@@ -157,6 +167,15 @@ class MarketStructure:
             return state  # flat channel — skip
         if state.trend == "bearish" and state.sma_slope > -slope_threshold:
             return state  # flat channel — skip
+
+        # ── Macro EMA filter ───────────────────────────────────
+        # Only trade in the direction of the 6h trend.
+        # Long signals require close > macro EMA; short signals require close < macro EMA.
+        if state.macro_ema > 0:
+            if state.trend == "bullish" and current_close < state.macro_ema:
+                return state  # short-term bullish, but macro trend is down — skip
+            if state.trend == "bearish" and current_close > state.macro_ema:
+                return state  # short-term bearish, but macro trend is up — skip
 
         # ── Volume filter ──────────────────────────────────────
         vol_ok = self._check_volume(df)

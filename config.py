@@ -34,13 +34,24 @@ class Config:
     ATR_SL_MULT: float = float(os.getenv("ATR_SL_MULT", "1.5"))
 
     # ── Signal filters ─────────────────────────────────────────
-    # Require this many of the last 10 candles to be outside the channel
-    # before a signal is considered tradeable.
     TREND_CONFIRM_CANDLES: int = int(os.getenv("TREND_CONFIRM_CANDLES", "5"))
-    # When true, only pullback entries are taken (no breakout-chasing).
     PULLBACK_ONLY: bool = os.getenv("PULLBACK_ONLY", "true").lower() == "true"
-    # Signal candle volume must be >= VOLUME_MULT × 20-period avg volume.
     VOLUME_MULT: float = float(os.getenv("VOLUME_MULT", "1.2"))
+    # Macro EMA — only trade in direction of this EMA on the same timeframe.
+    # EMA(72) on 5m ≈ 6 hours of trend. Set to 0 to disable.
+    MACRO_EMA: int = int(os.getenv("MACRO_EMA", "72"))
+
+    # ── Trade management ───────────────────────────────────────
+    # Move SL to entry once price reaches this many R in profit (0 = disabled).
+    BREAKEVEN_AT_R: float = float(os.getenv("BREAKEVEN_AT_R", "1.0"))
+
+    # ── Circuit breaker ────────────────────────────────────────
+    # Pause trading for CIRCUIT_PAUSE_HOURS after either:
+    #   - CONSECUTIVE_LOSS_LIMIT consecutive losses, OR
+    #   - MAX_DAILY_LOSS_PCT drawdown from the session-high balance
+    CONSECUTIVE_LOSS_LIMIT: int = int(os.getenv("CONSECUTIVE_LOSS_LIMIT", "3"))
+    MAX_DAILY_LOSS_PCT: float = float(os.getenv("MAX_DAILY_LOSS_PCT", "0.03"))  # 3%
+    CIRCUIT_PAUSE_HOURS: float = float(os.getenv("CIRCUIT_PAUSE_HOURS", "6.0"))
 
     # ── Dry run / paper trading ────────────────────────────────
     # DRY_RUN=true  → live mainnet data, no wallet needed, trades simulated

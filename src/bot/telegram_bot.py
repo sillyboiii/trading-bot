@@ -309,9 +309,10 @@ class TradingBot:
             lines.append(f"*{coin}*")
             for tf, res in tf_results.items():
                 icon = "✅" if res['net_pct'] > 0 else "❌"
+                be = res.get('breakevens', 0)
                 lines.append(
                     f"  {icon} `{tf}` — {res['total_trades']} trades  "
-                    f"({res['wins']}W / {res['losses']}L / {res['timeouts']} timeout)\n"
+                    f"({res['wins']}W / {res['losses']}L / {be}BE / {res['timeouts']} timeout)\n"
                     f"       WR: {res['win_rate']:.0f}%  |  "
                     f"Avg win R:R: {res['avg_win_rr']:.2f}  |  "
                     f"EV: {res['ev_per_trade']:+.3f}R"

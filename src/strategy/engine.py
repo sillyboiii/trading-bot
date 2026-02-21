@@ -37,7 +37,8 @@ class PairState:
     last_candle_time: int = 0
     in_trade: bool = False
     trades_taken: int = 0
-    active_setup: Optional[TradeSetup] = None  # stored for paper SL/TP monitoring
+    active_setup: Optional[TradeSetup] = None   # stored for paper SL/TP monitoring
+    breakeven_activated: bool = False            # True once SL has been moved to entry
 
 
 class StrategyEngine:
@@ -62,7 +63,13 @@ class StrategyEngine:
             atr_length=config.ATR_LENGTH,
             pullback_only=config.PULLBACK_ONLY,
             volume_mult=config.VOLUME_MULT,
+            macro_ema_period=config.MACRO_EMA,
         )
+
+        # ── Circuit breaker state ──────────────────────────────
+        self._consecutive_losses: int = 0
+        self._peak_balance: float = config.PAPER_BALANCE  # tracks session high
+        self._paused_until: float = 0.0                   # unix timestamp
         self.risk_manager = RiskManager(
             min_rr=config.MIN_RR,
             position_size_pct=config.POSITION_SIZE_PCT,
@@ -127,6 +134,12 @@ class StrategyEngine:
         # In paper mode, check whether any open position has hit SL/TP
         if self.client.dry_run:
             await self._check_paper_positions()
+
+        # Circuit breaker — skip new entries while paused
+        if self._paused_until > time.time():
+            remaining = (self._paused_until - time.time()) / 3600
+            logger.info(f"Circuit breaker active — {remaining:.1f}h remaining")
+            return
 
         for coin in self.config.PAIRS:
             try:
@@ -254,9 +267,11 @@ class StrategyEngine:
 
     async def _check_paper_positions(self):
         """
-        Poll current prices and auto-close paper positions when SL or TP is hit.
-        Real-mode positions are managed by exchange trigger orders; this only
-        runs when client.dry_run is True.
+        Poll current prices and:
+          1. Move SL to breakeven once BREAKEVEN_AT_R profit is reached.
+          2. Auto-close when SL or TP is hit.
+          3. Update circuit breaker on close.
+        Only runs in dry_run mode — live positions use exchange trigger orders.
         """
         for coin, state in self.pair_states.items():
             if not state.in_trade or not state.active_setup:
@@ -267,16 +282,36 @@ class StrategyEngine:
                 continue
 
             setup = state.active_setup
-            outcome: Optional[str] = None
+            risk = abs(setup.entry - setup.stop_loss)
 
+            # ── Breakeven stop ────────────────────────────────
+            be_r = self.config.BREAKEVEN_AT_R
+            if be_r > 0 and not state.breakeven_activated:
+                if setup.side == "long" and price >= setup.entry + be_r * risk:
+                    setup.stop_loss = setup.entry
+                    state.breakeven_activated = True
+                    await self._alert(
+                        f"🔒 *Breakeven — {coin}*\n"
+                        f"  SL moved to entry ${setup.entry:,.4f} at {price:,.4f}"
+                    )
+                elif setup.side == "short" and price <= setup.entry - be_r * risk:
+                    setup.stop_loss = setup.entry
+                    state.breakeven_activated = True
+                    await self._alert(
+                        f"🔒 *Breakeven — {coin}*\n"
+                        f"  SL moved to entry ${setup.entry:,.4f} at {price:,.4f}"
+                    )
+
+            # ── Check SL / TP ─────────────────────────────────
+            outcome: Optional[str] = None
             if setup.side == "long":
                 if price <= setup.stop_loss:
-                    outcome = "loss"
+                    outcome = "breakeven" if state.breakeven_activated else "loss"
                 elif price >= setup.take_profit:
                     outcome = "win"
             else:
                 if price >= setup.stop_loss:
-                    outcome = "loss"
+                    outcome = "breakeven" if state.breakeven_activated else "loss"
                 elif price <= setup.take_profit:
                     outcome = "win"
 
@@ -286,19 +321,29 @@ class StrategyEngine:
             self.client.close_position(coin)
             state.in_trade = False
             state.active_setup = None
+            state.breakeven_activated = False
 
             balance = self.client.get_account_balance()
+
+            # ── Update peak balance ────────────────────────────
+            if balance > self._peak_balance:
+                self._peak_balance = balance
+
+            # ── Circuit breaker tracking ───────────────────────
             if outcome == "win":
-                icon = "✅"
-                rr_label = f"+{setup.rr_ratio:.2f}R"
-            else:
-                icon = "❌"
-                rr_label = "-1.00R"
+                self._consecutive_losses = 0
+                icon, rr_label = "✅", f"+{setup.rr_ratio:.2f}R"
+            elif outcome == "breakeven":
+                # Breakeven doesn't reset or increment the loss counter
+                icon, rr_label = "🔄", "±0.00R (breakeven)"
+            else:  # loss
+                self._consecutive_losses += 1
+                icon, rr_label = "❌", "-1.00R"
 
             await self._alert(
                 f"{icon} *Paper Trade Closed — {coin}*\n"
                 f"  Side:    {setup.side.upper()}\n"
-                f"  Outcome: {'WIN' if outcome == 'win' else 'LOSS'}\n"
+                f"  Outcome: {outcome.upper()}\n"
                 f"  Result:  {rr_label}\n"
                 f"  Balance: ${balance:,.2f}"
             )
@@ -306,6 +351,45 @@ class StrategyEngine:
                 f"[PAPER] {coin} closed — {outcome} | {rr_label} | "
                 f"balance=${balance:,.2f}"
             )
+
+            # ── Trigger circuit breaker if needed ─────────────
+            await self._check_circuit_breaker(balance)
+
+    # ──────────────────────────────────────────────────────────
+    # Circuit breaker
+    # ──────────────────────────────────────────────────────────
+
+    async def _check_circuit_breaker(self, balance: float):
+        """
+        Pause new entries for CIRCUIT_PAUSE_HOURS if either condition is met:
+          - CONSECUTIVE_LOSS_LIMIT consecutive losses in a row, OR
+          - Balance has dropped MAX_DAILY_LOSS_PCT below the session peak.
+        """
+        if self._paused_until > time.time():
+            return  # already paused
+
+        reason = None
+        limit = self.config.CONSECUTIVE_LOSS_LIMIT
+        if limit > 0 and self._consecutive_losses >= limit:
+            reason = f"{self._consecutive_losses} consecutive losses"
+
+        dd_pct = self.config.MAX_DAILY_LOSS_PCT
+        if dd_pct > 0 and self._peak_balance > 0:
+            drawdown = (self._peak_balance - balance) / self._peak_balance
+            if drawdown >= dd_pct:
+                reason = f"{drawdown*100:.1f}% drawdown from peak ${self._peak_balance:,.2f}"
+
+        if reason:
+            pause_secs = self.config.CIRCUIT_PAUSE_HOURS * 3600
+            self._paused_until = time.time() + pause_secs
+            self._consecutive_losses = 0
+            await self._alert(
+                f"🛑 *Circuit Breaker Triggered*\n"
+                f"  Reason:  {reason}\n"
+                f"  Pausing: {self.config.CIRCUIT_PAUSE_HOURS:.0f}h — no new entries\n"
+                f"  Balance: ${balance:,.2f}"
+            )
+            logger.warning(f"Circuit breaker triggered: {reason} — paused {self.config.CIRCUIT_PAUSE_HOURS}h")
 
     # ──────────────────────────────────────────────────────────
     # Status helpers (used by Telegram bot)
