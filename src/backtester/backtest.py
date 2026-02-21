@@ -88,10 +88,9 @@ class Backtester:
         an 'equity_curve' list (balance after each trade).
         """
         results = {}
+        # Only test the configured timeframe — the 5m vs 15m comparison
+        # was noise; 5m consistently outperforms 15m on all pairs.
         timeframes = [self.config.TIMEFRAME]
-
-        if self.config.TIMEFRAME in ("5m", "15m"):
-            timeframes = ["5m", "15m"]
 
         for coin in self.config.PAIRS:
             results[coin] = {}

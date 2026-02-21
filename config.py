@@ -15,7 +15,9 @@ class Config:
     HL_TESTNET: bool = os.getenv("HL_TESTNET", "true").lower() == "true"
 
     # ── Strategy ───────────────────────────────────────────────
-    PAIRS: list[str] = [p.strip() for p in os.getenv("PAIRS", "BTC,ETH,SOL").split(",")]
+    # All six pairs are actively traded on Hyperliquid with sufficient liquidity.
+    # Add or remove via PAIRS env var, e.g. PAIRS=BTC,ETH,SOL
+    PAIRS: list[str] = [p.strip() for p in os.getenv("PAIRS", "BTC,ETH,SOL,AVAX,LINK,DOGE").split(",")]
     TIMEFRAME: str = os.getenv("TIMEFRAME", "5m")
     POSITION_SIZE_PCT: float = float(os.getenv("POSITION_SIZE_PCT", "0.10"))  # legacy fallback
     RISK_PER_TRADE_PCT: float = float(os.getenv("RISK_PER_TRADE_PCT", "0.01"))  # 1% balance at risk per trade
