@@ -36,7 +36,7 @@ class Config:
     # ── Signal filters ─────────────────────────────────────────
     TREND_CONFIRM_CANDLES: int = int(os.getenv("TREND_CONFIRM_CANDLES", "5"))
     PULLBACK_ONLY: bool = os.getenv("PULLBACK_ONLY", "true").lower() == "true"
-    VOLUME_MULT: float = float(os.getenv("VOLUME_MULT", "1.2"))
+    VOLUME_MULT: float = float(os.getenv("VOLUME_MULT", "1.0"))
     # Macro EMA — only trade in direction of this EMA on the same timeframe.
     # EMA(72) on 5m ≈ 6 hours of trend. Set to 0 to disable.
     MACRO_EMA: int = int(os.getenv("MACRO_EMA", "72"))

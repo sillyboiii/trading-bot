@@ -158,24 +158,17 @@ class MarketStructure:
         if n_confirm < self.trend_confirm_candles:
             return state  # trend too fresh — no signal yet
 
-        # ── Slope filter — channel must be moving in our direction ─
-        # Longs: channel midpoint must be sloping up (> 0)
-        # Shorts: channel midpoint must be sloping down (< 0)
-        # Using a small threshold to ignore flat/sideways channels.
-        slope_threshold = 0.0002  # 0.02% per slope_candles interval
-        if state.trend == "bullish" and state.sma_slope < slope_threshold:
-            return state  # flat channel — skip
-        if state.trend == "bearish" and state.sma_slope > -slope_threshold:
-            return state  # flat channel — skip
-
         # ── Macro EMA filter ───────────────────────────────────
-        # Only trade in the direction of the 6h trend.
-        # Long signals require close > macro EMA; short signals require close < macro EMA.
+        # Check that the SMA CHANNEL is positioned in the macro trend direction,
+        # NOT the current price. During a pullback entry, price has dipped into
+        # the channel and current_close may temporarily sit below the EMA even
+        # in a genuine uptrend. Using upper_sma/lower_sma instead avoids
+        # rejecting valid pullback setups.
         if state.macro_ema > 0:
-            if state.trend == "bullish" and current_close < state.macro_ema:
-                return state  # short-term bullish, but macro trend is down — skip
-            if state.trend == "bearish" and current_close > state.macro_ema:
-                return state  # short-term bearish, but macro trend is up — skip
+            if state.trend == "bullish" and state.upper_sma < state.macro_ema:
+                return state  # channel below macro trend — skip longs
+            if state.trend == "bearish" and state.lower_sma > state.macro_ema:
+                return state  # channel above macro trend — skip shorts
 
         # ── Volume filter ──────────────────────────────────────
         vol_ok = self._check_volume(df)
