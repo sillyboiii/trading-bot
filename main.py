@@ -2,17 +2,19 @@
 Trading Bot — Entry Point
 =========================
 Usage:
-    python main.py
+    python main.py              # run the Telegram bot
+    python main.py --backtest   # run backtest and print results, then exit
 
 Ensure you have copied .env.example → .env and filled in your values.
 """
 
+import argparse
 import logging
 import sys
 from pathlib import Path
 
 from config import Config
-from src.bot.telegram_bot import TradingBot
+from src.exchange.hyperliquid_client import HyperliquidClient
 
 # ── Logging setup ──────────────────────────────────────────────────────────────
 log_dir = Path("logs")
@@ -34,13 +36,76 @@ logging.getLogger("telegram").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
-def main():
+def run_backtest(config: Config):
+    """Run backtest and print results to stdout, then exit."""
+    client = HyperliquidClient(
+        private_key=config.HL_PRIVATE_KEY,
+        wallet_address=config.HL_WALLET_ADDRESS,
+        testnet=config.HL_TESTNET,
+        dry_run=True,  # backtest never needs a real wallet
+        paper_balance=config.PAPER_BALANCE,
+    )
+
+    from src.backtester.backtest import Backtester
+
+    logger.info("Starting backtest — SMA Channel Strategy")
+    logger.info(f"Pairs: {config.PAIRS} | SMA: {config.SMA_LENGTH} | Min R:R: {config.MIN_RR}")
+
+    backtester = Backtester(client=client, config=config)
+    results = backtester.run()
+
+    print("\n" + "=" * 60)
+    print("  BACKTEST RESULTS — SMA Channel Strategy")
+    print("=" * 60)
+    for coin, tf_results in results.items():
+        print(f"\n  {coin}")
+        print(f"  {'─' * 50}")
+        for tf, res in tf_results.items():
+            print(f"  {tf:>4s} │ trades={res['total_trades']:>3d} │ "
+                  f"win={res['win_rate']:>5.1f}% │ "
+                  f"avg R:R={res['avg_rr']:>5.2f} │ "
+                  f"rejected={res['rejected']:>3d} │ "
+                  f"net={res['net_pct']:>+7.1f}%")
+    print("=" * 60 + "\n")
+
+
+def run_bot(config: Config):
+    """Start the Telegram trading bot (blocking)."""
+    from src.bot.telegram_bot import TradingBot
+
     logger.info("=" * 60)
-    logger.info("  Price Action Trading Bot  ")
-    logger.info("  Hyperliquid + Telegram    ")
+    logger.info("  SMA Channel Trading Bot    ")
+    logger.info("  Hyperliquid + Telegram     ")
     logger.info("=" * 60)
 
+    net = "TESTNET ⚠️" if config.HL_TESTNET else "MAINNET"
+    logger.info(f"Network:    {net}")
+    logger.info(f"Pairs:      {config.PAIRS}")
+    logger.info(f"Timeframe:  {config.TIMEFRAME}")
+    logger.info(f"SMA length: {config.SMA_LENGTH}")
+    logger.info(f"Min R:R:    {config.MIN_RR}")
+    logger.info(f"Position:   {config.POSITION_SIZE_PCT * 100:.0f}% of account")
+
+    bot = TradingBot(config)
+    bot.run()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="SMA Channel Trading Bot")
+    parser.add_argument(
+        "--backtest",
+        action="store_true",
+        help="Run a backtest on historical data and exit",
+    )
+    args = parser.parse_args()
+
     config = Config()
+
+    # For backtest mode, wallet keys are not required
+    if args.backtest:
+        # Only validate Telegram creds (not needed for backtest either, skip all)
+        run_backtest(config)
+        return
 
     errors = config.validate()
     if errors:
@@ -50,15 +115,7 @@ def main():
         logger.error("Please copy .env.example → .env and fill in your values.")
         sys.exit(1)
 
-    net = "TESTNET ⚠️" if config.HL_TESTNET else "MAINNET"
-    logger.info(f"Network:    {net}")
-    logger.info(f"Pairs:      {config.PAIRS}")
-    logger.info(f"Timeframe:  {config.TIMEFRAME}")
-    logger.info(f"Min R:R:    {config.MIN_RR}")
-    logger.info(f"Position:   {config.POSITION_SIZE_PCT * 100:.0f}% of account")
-
-    bot = TradingBot(config)
-    bot.run()
+    run_bot(config)
 
 
 if __name__ == "__main__":

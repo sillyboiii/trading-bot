@@ -245,6 +245,7 @@ class TradingBot:
             f"Mode:        `{net}`\n"
             f"Pairs:       `{', '.join(cfg.PAIRS)}`\n"
             f"Timeframe:   `{cfg.TIMEFRAME}`\n"
+            f"SMA length:  `{cfg.SMA_LENGTH}`\n"
             f"Position sz: `{cfg.POSITION_SIZE_PCT * 100:.0f}%`\n"
             f"Min R:R:     `{cfg.MIN_RR}`\n"
             f"Pivot lb:    `{cfg.PIVOT_LOOKBACK}`\n"
