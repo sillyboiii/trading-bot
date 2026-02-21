@@ -114,28 +114,38 @@ class MarketStructure:
         state.recent_swing_high = self._find_recent_swing(df, "high")
         state.recent_swing_low = self._find_recent_swing(df, "low")
 
-        # ── Entry signals ──────────────────────────────────────
+        # ── Entry signals (edge-triggered — fire only on the crossover candle) ──
+        prev_close = float(df["close"].iloc[-2]) if len(df) >= 2 else current_close
+
         if state.trend == "bullish":
+            # Breakout long: THIS candle is the first close above recent swing high
             if (
                 state.recent_swing_high
+                and prev_close <= state.recent_swing_high.price
                 and current_close > state.recent_swing_high.price
             ):
                 state.breakout_long = True
 
-            state.pullback_long = self._detect_pullback(
-                df, upper_sma, lower_sma, direction="long"
-            )
+            # Pullback long: previous candle was inside/below channel,
+            # current candle is the first close back above upper SMA
+            prev_upper = float(upper_sma.iloc[-2]) if len(upper_sma) >= 2 else state.upper_sma
+            if prev_close <= prev_upper and current_close > state.upper_sma:
+                state.pullback_long = True
 
         elif state.trend == "bearish":
+            # Breakout short: THIS candle is the first close below recent swing low
             if (
                 state.recent_swing_low
+                and prev_close >= state.recent_swing_low.price
                 and current_close < state.recent_swing_low.price
             ):
                 state.breakout_short = True
 
-            state.pullback_short = self._detect_pullback(
-                df, upper_sma, lower_sma, direction="short"
-            )
+            # Pullback short: previous candle was inside/above channel,
+            # current candle is the first close back below lower SMA
+            prev_lower = float(lower_sma.iloc[-2]) if len(lower_sma) >= 2 else state.lower_sma
+            if prev_close >= prev_lower and current_close < state.lower_sma:
+                state.pullback_short = True
 
         return state
 
@@ -166,48 +176,3 @@ class MarketStructure:
                 )
         return None
 
-    def _detect_pullback(
-        self,
-        df: pd.DataFrame,
-        upper_sma: pd.Series,
-        lower_sma: pd.Series,
-        direction: str,
-    ) -> bool:
-        """
-        Detect a pullback-to-channel entry.
-
-        Long pullback:
-          Current candle closes above the upper SMA (trend = bullish)
-          AND at least one of the 3 prior candles closed INSIDE or BELOW
-          the channel (i.e., close <= upper SMA), confirming a retrace.
-
-        Short pullback:
-          Current candle closes below the lower SMA (trend = bearish)
-          AND at least one of the 3 prior candles closed INSIDE or ABOVE
-          the channel (i.e., close >= lower SMA).
-        """
-        n = len(df)
-        if n < 5:
-            return False
-
-        if direction == "long":
-            # Current close must be above upper SMA (already guaranteed by trend=bullish,
-            # but check explicitly for safety)
-            if float(df["close"].iloc[-1]) <= float(upper_sma.iloc[-1]):
-                return False
-            for j in (-2, -3, -4):
-                if n + j < 0:
-                    break
-                if float(df["close"].iloc[j]) <= float(upper_sma.iloc[j]):
-                    return True
-
-        else:  # short
-            if float(df["close"].iloc[-1]) >= float(lower_sma.iloc[-1]):
-                return False
-            for j in (-2, -3, -4):
-                if n + j < 0:
-                    break
-                if float(df["close"].iloc[j]) >= float(lower_sma.iloc[j]):
-                    return True
-
-        return False
