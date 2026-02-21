@@ -179,6 +179,10 @@ class StrategyEngine:
         # ── Step 3: R:R filter ─────────────────────────────────
         balance = self.client.get_account_balance()
 
+        # Last closed candle's extreme — used for tighter SL placement
+        signal_candle_low = float(df["low"].iloc[-1])
+        signal_candle_high = float(df["high"].iloc[-1])
+
         setup = self.risk_manager.evaluate(
             coin=coin,
             side=side,
@@ -189,6 +193,8 @@ class StrategyEngine:
             recent_swing_low=structure.recent_swing_low,
             account_balance=balance,
             signal_type=signal_type,
+            signal_candle_low=signal_candle_low,
+            signal_candle_high=signal_candle_high,
         )
 
         if setup is None:

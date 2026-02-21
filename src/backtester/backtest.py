@@ -129,6 +129,10 @@ class Backtester:
             entry_price = float(df["open"].iloc[i])
 
             # Step 3: R:R
+            # The signal candle is the last candle of the analysis window (df[i-1]).
+            # Its low/high are used as a tighter SL anchor than the full SMA channel.
+            signal_candle_low = float(df["low"].iloc[i - 1])
+            signal_candle_high = float(df["high"].iloc[i - 1])
             setup = self.risk.evaluate(
                 coin=coin,
                 side=side,
@@ -139,6 +143,8 @@ class Backtester:
                 recent_swing_low=structure.recent_swing_low,
                 account_balance=balance,
                 signal_type=signal_type,
+                signal_candle_low=signal_candle_low,
+                signal_candle_high=signal_candle_high,
             )
 
             if setup is None:

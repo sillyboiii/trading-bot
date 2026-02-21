@@ -76,6 +76,8 @@ class RiskManager:
         recent_swing_low: Optional[SwingPoint],
         account_balance: float,
         signal_type: str = "pullback",
+        signal_candle_low: Optional[float] = None,
+        signal_candle_high: Optional[float] = None,
     ) -> Optional["TradeSetup"]:
         """
         Build and evaluate a trade setup.
@@ -87,17 +89,19 @@ class RiskManager:
 
         # ── Stop Loss ─────────────────────────────────────────
         if side == "long":
-            # Primary SL: just below the lower SMA
+            # Base SL: just below the lower SMA
             sl_sma = lower_sma * (1 - self.sl_buffer)
-            # If there's a swing low tighter than the SMA level, prefer it
-            if recent_swing_low and recent_swing_low.price > sl_sma:
-                sl = recent_swing_low.price * (1 - self.sl_buffer)
+            # Tighter alternative: just below the signal candle's low.
+            # Using the candle's low means the trade is invalidated as soon as
+            # the rejection candle structure fails — a much cleaner exit level.
+            if signal_candle_low and signal_candle_low > sl_sma:
+                sl = signal_candle_low * (1 - self.sl_buffer)
             else:
                 sl = sl_sma
         else:  # short
             sl_sma = upper_sma * (1 + self.sl_buffer)
-            if recent_swing_high and recent_swing_high.price < sl_sma:
-                sl = recent_swing_high.price * (1 + self.sl_buffer)
+            if signal_candle_high and signal_candle_high < sl_sma:
+                sl = signal_candle_high * (1 + self.sl_buffer)
             else:
                 sl = sl_sma
 

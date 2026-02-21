@@ -131,6 +131,7 @@ class MarketStructure:
 
         # ── Entry signals (edge-triggered — fire only on the crossover candle) ──
         prev_close = float(df["close"].iloc[-2]) if len(df) >= 2 else current_close
+        current_open = float(df["open"].iloc[-1])
 
         if state.trend == "bullish":
             # Breakout long: THIS candle is the first close above recent swing high.
@@ -146,9 +147,14 @@ class MarketStructure:
                 state.breakout_long = True
 
             # Pullback long: previous candle was inside/below channel,
-            # current candle is the first close back above upper SMA
+            # current candle is the first close back above upper SMA.
+            # Candle must be bullish (close > open) to confirm rejection momentum.
             prev_upper = float(upper_sma.iloc[-2]) if len(upper_sma) >= 2 else state.upper_sma
-            if prev_close <= prev_upper and current_close > state.upper_sma:
+            if (
+                prev_close <= prev_upper
+                and current_close > state.upper_sma
+                and current_close > current_open  # bullish close = conviction
+            ):
                 state.pullback_long = True
 
         elif state.trend == "bearish":
@@ -163,9 +169,14 @@ class MarketStructure:
                 state.breakout_short = True
 
             # Pullback short: previous candle was inside/above channel,
-            # current candle is the first close back below lower SMA
+            # current candle is the first close back below lower SMA.
+            # Candle must be bearish (close < open) to confirm rejection momentum.
             prev_lower = float(lower_sma.iloc[-2]) if len(lower_sma) >= 2 else state.lower_sma
-            if prev_close >= prev_lower and current_close < state.lower_sma:
+            if (
+                prev_close >= prev_lower
+                and current_close < state.lower_sma
+                and current_close < current_open  # bearish close = conviction
+            ):
                 state.pullback_short = True
 
         return state
