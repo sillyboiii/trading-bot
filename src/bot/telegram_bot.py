@@ -11,7 +11,7 @@ Commands available to the trader:
   /close <coin> — Manually close a position
   /orders   — Open orders
   /config   — Show current config
-  /backtest — Run a quick backtest summary
+  /backtest [days] — Run backtest (default 30 days) and send equity chart
   /help     — Command list
 """
 
@@ -165,11 +165,22 @@ class TradingBot:
         balance = self.client.get_account_balance()
         if self.config.DRY_RUN:
             label = "DRY RUN (paper)"
+            start = self.config.PAPER_BALANCE
+            growth = (balance - start) / start * 100
+            growth_str = f"+{growth:.2f}%" if growth >= 0 else f"{growth:.2f}%"
+            growth_icon = "📈" if growth >= 0 else "📉"
+            msg = (
+                f"💰 *Balance ({label})*\n"
+                f"`${balance:,.2f} USD`\n"
+                f"{growth_icon} {growth_str} vs starting `${start:,.2f}`"
+            )
         elif self.config.HL_TESTNET:
             label = "TESTNET"
+            msg = f"💰 *Balance ({label})*\n`${balance:,.2f} USD`"
         else:
             label = "MAINNET"
-        await self._reply(update, f"💰 *Balance ({label})*\n`${balance:,.2f} USD`")
+            msg = f"💰 *Balance ({label})*\n`${balance:,.2f} USD`"
+        await self._reply(update, msg)
 
     async def _cmd_positions(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorised(update):
@@ -266,19 +277,31 @@ class TradingBot:
         if not self._is_authorised(update):
             return
 
-        await self._reply(update, "⏳ Running backtest… this may take a moment.")
+        # Parse optional days arg — e.g. /backtest 30 (default 30, max 90)
+        days = 30
+        if ctx.args:
+            try:
+                days = max(7, min(90, int(ctx.args[0])))
+            except ValueError:
+                await self._reply(update, "Usage: /backtest [days]  e.g. /backtest 30")
+                return
+
+        await self._reply(update, f"⏳ Running {days}-day backtest… this may take a moment.")
 
         backtester = Backtester(
             client=self.client,
             config=self.config,
         )
 
-        results = backtester.run()
+        results = backtester.run(days=days)
         if not results:
             await self._reply(update, "❌ Backtest failed — check logs.")
             return
 
-        lines = ["*Backtest Results*", "_win R:R = winners only | EV = expected value per trade_\n"]
+        lines = [
+            f"*Backtest Results — {days} days*",
+            "_Compounding on · win R:R = winners only · EV = expected value per trade_\n",
+        ]
         for coin, tf_results in results.items():
             lines.append(f"*{coin}*")
             for tf, res in tf_results.items():
@@ -288,10 +311,17 @@ class TradingBot:
                     f"({res['win_rate']:.0f}% win) | "
                     f"win R:R={res['avg_win_rr']:.2f} | "
                     f"EV={res['ev_per_trade']:+.3f}R | "
-                    f"net={res['net_pct']:+.1f}%"
+                    f"net={res['net_pct']:+.1f}% → `${res['final_balance']:,.0f}`"
                 )
             lines.append("")
         await self._reply(update, "\n".join(lines))
+
+        # Send equity curve chart
+        try:
+            chart_bytes = Backtester.generate_chart(results, days=days)
+            await update.message.reply_photo(photo=chart_bytes)
+        except Exception as e:
+            logger.error(f"Failed to generate backtest chart: {e}")
 
     async def _cmd_help(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorised(update):
@@ -307,7 +337,7 @@ class TradingBot:
             "/close `<COIN>` — Close a position manually\n"
             "/orders — Open orders\n"
             "/config — Show current settings\n"
-            "/backtest — Backtest the strategy\n"
+            "/backtest `[days]` — Backtest the strategy (default 30d, max 90d)\n"
             "/help — This message\n"
         )
         await self._reply(update, text)
