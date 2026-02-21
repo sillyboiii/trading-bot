@@ -37,6 +37,7 @@ class PairState:
     last_candle_time: int = 0
     in_trade: bool = False
     trades_taken: int = 0
+    active_setup: Optional[TradeSetup] = None  # stored for paper SL/TP monitoring
 
 
 class StrategyEngine:
@@ -116,6 +117,10 @@ class StrategyEngine:
 
     async def _tick(self):
         """Evaluate strategy for all pairs on the latest closed candle."""
+        # In paper mode, check whether any open position has hit SL/TP
+        if self.client.dry_run:
+            await self._check_paper_positions()
+
         for coin in self.config.PAIRS:
             try:
                 await self._process_pair(coin)
@@ -167,8 +172,9 @@ class StrategyEngine:
         else:
             return  # No signal this candle
 
-        # Skip if already in a trade for this coin
-        if state.in_trade or self.client.has_open_position(coin):
+        # Use the exchange/paper position as source of truth so that
+        # externally-closed positions don't block new signals forever.
+        if self.client.has_open_position(coin):
             logger.debug(f"{coin}: already in trade, skipping signal")
             return
 
@@ -223,6 +229,7 @@ class StrategyEngine:
 
         if success:
             state.in_trade = True
+            state.active_setup = setup
             state.trades_taken += 1
             label = (
                 f"🧪 *Paper Trade — {coin}*"
@@ -232,6 +239,65 @@ class StrategyEngine:
             await self._alert(f"{label}\n{setup.summary()}")
         else:
             await self._alert(f"❌ *Trade execution failed for {coin}*")
+
+    # ──────────────────────────────────────────────────────────
+    # Paper position monitoring
+    # ──────────────────────────────────────────────────────────
+
+    async def _check_paper_positions(self):
+        """
+        Poll current prices and auto-close paper positions when SL or TP is hit.
+        Real-mode positions are managed by exchange trigger orders; this only
+        runs when client.dry_run is True.
+        """
+        for coin, state in self.pair_states.items():
+            if not state.in_trade or not state.active_setup:
+                continue
+
+            price = self.client.get_current_price(coin)
+            if not price:
+                continue
+
+            setup = state.active_setup
+            outcome: Optional[str] = None
+
+            if setup.side == "long":
+                if price <= setup.stop_loss:
+                    outcome = "loss"
+                elif price >= setup.take_profit:
+                    outcome = "win"
+            else:
+                if price >= setup.stop_loss:
+                    outcome = "loss"
+                elif price <= setup.take_profit:
+                    outcome = "win"
+
+            if outcome is None:
+                continue
+
+            self.client.close_position(coin)
+            state.in_trade = False
+            state.active_setup = None
+
+            balance = self.client.get_account_balance()
+            if outcome == "win":
+                icon = "✅"
+                rr_label = f"+{setup.rr_ratio:.2f}R"
+            else:
+                icon = "❌"
+                rr_label = "-1.00R"
+
+            await self._alert(
+                f"{icon} *Paper Trade Closed — {coin}*\n"
+                f"  Side:    {setup.side.upper()}\n"
+                f"  Outcome: {'WIN' if outcome == 'win' else 'LOSS'}\n"
+                f"  Result:  {rr_label}\n"
+                f"  Balance: ${balance:,.2f}"
+            )
+            logger.info(
+                f"[PAPER] {coin} closed — {outcome} | {rr_label} | "
+                f"balance=${balance:,.2f}"
+            )
 
     # ──────────────────────────────────────────────────────────
     # Status helpers (used by Telegram bot)

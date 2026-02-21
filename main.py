@@ -102,13 +102,21 @@ def main():
         action="store_true",
         help="Run a backtest on historical data and exit",
     )
+    parser.add_argument(
+        "--paper",
+        action="store_true",
+        help="Run in paper-trading mode (live market data, no real orders)",
+    )
     args = parser.parse_args()
 
     config = Config()
 
+    # --paper overrides DRY_RUN regardless of .env
+    if args.paper:
+        config.DRY_RUN = True
+
     # For backtest mode, wallet keys are not required
     if args.backtest:
-        # Only validate Telegram creds (not needed for backtest either, skip all)
         run_backtest(config)
         return
 
