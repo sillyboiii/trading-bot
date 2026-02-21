@@ -127,7 +127,7 @@ class StrategyEngine:
 
         # ── Fetch candles ──────────────────────────────────────
         df = self.client.get_candles(coin, self.config.TIMEFRAME, self.config.CANDLE_LIMIT)
-        if df.empty or len(df) < self.config.SMA_LENGTH + self.config.PIVOT_LOOKBACK + 5:
+        if df.empty or len(df) < self.config.SMA_LENGTH + self.config.PIVOT_LOOKBACK * 2 + 5:
             logger.debug(f"{coin}: insufficient candle data")
             return
 

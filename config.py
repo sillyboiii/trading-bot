@@ -19,7 +19,7 @@ class Config:
     TIMEFRAME: str = os.getenv("TIMEFRAME", "5m")
     POSITION_SIZE_PCT: float = float(os.getenv("POSITION_SIZE_PCT", "0.10"))
     MIN_RR: float = float(os.getenv("MIN_RR", "2.0"))
-    PIVOT_LOOKBACK: int = int(os.getenv("PIVOT_LOOKBACK", "5"))
+    PIVOT_LOOKBACK: int = int(os.getenv("PIVOT_LOOKBACK", "10"))
 
     # ── SMA Channel ────────────────────────────────────────────
     # SMA_LENGTH controls both SMA(High) and SMA(Low) for the price channel

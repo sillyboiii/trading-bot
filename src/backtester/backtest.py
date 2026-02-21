@@ -29,7 +29,7 @@ from src.strategy.risk_manager import RiskManager
 
 logger = logging.getLogger(__name__)
 
-BACKTEST_CANDLE_LIMIT = 500
+BACKTEST_CANDLE_LIMIT = 1000
 SIM_BALANCE = 10_000.0
 
 
@@ -100,7 +100,7 @@ class Backtester:
         net_pct = 0.0
         balance = SIM_BALANCE
 
-        min_start = self.config.SMA_LENGTH + self.config.PIVOT_LOOKBACK + 5
+        min_start = self.config.SMA_LENGTH + self.config.PIVOT_LOOKBACK * 2 + 5
         in_trade_until: Optional[int] = None
 
         for i in range(min_start, len(df) - 1):

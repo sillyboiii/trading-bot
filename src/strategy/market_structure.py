@@ -68,9 +68,17 @@ class MarketStructure:
     SMA channel-based trend and signal detector.
     """
 
-    def __init__(self, sma_length: int = 20, pivot_lookback: int = 5):
+    def __init__(
+        self,
+        sma_length: int = 20,
+        pivot_lookback: int = 10,
+        trend_confirm_candles: int = 3,
+    ):
         self.sma_length = sma_length
         self.pivot_lookback = pivot_lookback
+        # How many consecutive candles must be outside the channel before
+        # we consider the trend established enough to trade.
+        self.trend_confirm_candles = trend_confirm_candles
 
     # ──────────────────────────────────────────────────────────
     # Public API
@@ -114,6 +122,13 @@ class MarketStructure:
         state.recent_swing_high = self._find_recent_swing(df, "high")
         state.recent_swing_low = self._find_recent_swing(df, "low")
 
+        # ── Trend confirmation: skip signals until trend is established ───────
+        # Count how many of the last N candles (excluding current) were outside
+        # the channel in the trend direction.
+        n_confirm = self._count_trend_candles(df, upper_sma, lower_sma, state.trend)
+        if n_confirm < self.trend_confirm_candles:
+            return state  # trend too fresh — no signal yet
+
         # ── Entry signals (edge-triggered — fire only on the crossover candle) ──
         prev_close = float(df["close"].iloc[-2]) if len(df) >= 2 else current_close
 
@@ -152,6 +167,36 @@ class MarketStructure:
     # ──────────────────────────────────────────────────────────
     # Internal helpers
     # ──────────────────────────────────────────────────────────
+
+    def _count_trend_candles(
+        self,
+        df: pd.DataFrame,
+        upper_sma: pd.Series,
+        lower_sma: pd.Series,
+        trend: str,
+    ) -> int:
+        """
+        Count how many consecutive prior candles (working backwards from the
+        second-to-last) had their close outside the channel in the given direction.
+        Stops counting as soon as a candle is inside or on the wrong side.
+        """
+        if trend == "ranging":
+            return 0
+
+        count = 0
+        for i in range(len(df) - 2, max(len(df) - 2 - self.trend_confirm_candles - 1, -1), -1):
+            if i < 0:
+                break
+            c = float(df["close"].iloc[i])
+            u = float(upper_sma.iloc[i])
+            lo = float(lower_sma.iloc[i])
+            if trend == "bullish" and c > u:
+                count += 1
+            elif trend == "bearish" and c < lo:
+                count += 1
+            else:
+                break  # chain broken
+        return count
 
     def _find_recent_swing(
         self, df: pd.DataFrame, kind: str
