@@ -1,17 +1,31 @@
 """
-Strategy Engine
-================
-Orchestrates the SMA Channel trading strategy for all configured pairs:
+Strategy Engine — BOS/CHoCH Supply & Demand Zone Strategy
+==========================================================
+Multi-timeframe trend-following using supply and demand zones:
 
-  Step 1 → SMA channel trend determination
-             (close > SMA-High → bullish | close < SMA-Low → bearish)
-  Step 2 → Entry signal detection
-             Type A (Breakout): close breaks above/below recent swing high/low
-             Type B (Pullback): price retraces into channel then closes back out
-  Step 3 → R:R filter (≥ 2.0 : 1)
+  Step 1 → HTF (1h) swing structure trend  (bullish = HH+HL | bearish = LH+LL)
+             Primary filter — higher weight. If HTF is ranging, no new trades.
 
-Runs on a timed loop, firing once per closed 5-minute candle.
-Sends Telegram alerts and executes trades via the exchange client.
+  Step 2 → LTF (5m) swing structure trend must AGREE with HTF.
+
+  Step 3 → Find BOS/CHoCH-validated demand/supply zones on the LTF.
+             A zone is only valid if the impulse that formed it broke through
+             a confirmed prior swing (BOS or CHoCH).  No BOS/CHoCH = no trade.
+
+  Step 4 → Price retraces into a valid zone → entry signal.
+             Side follows the agreed trend (long for bullish, short for bearish).
+
+  Step 5 → Stop Loss just outside zone boundary:
+             Long  → below demand zone_low  (− SL_BUFFER)
+             Short → above supply zone_high (+ SL_BUFFER)
+
+  Step 6 → Take Profit at next confirmed structure swing. Falls back to
+             MIN_RR × risk if no qualifying swing is available.
+
+  Step 7 → Trailing: after breakeven activates, SL trails to each new
+             confirmed swing low (long) / swing high (short) on the LTF.
+
+Runs on a timed loop, firing once per closed 5m candle.
 """
 
 import asyncio
@@ -26,6 +40,7 @@ from config import Config
 from src.exchange.hyperliquid_client import HyperliquidClient
 from src.strategy.market_structure import MarketStructure, StructureState
 from src.strategy.risk_manager import RiskManager, TradeSetup
+from src.strategy.zones import ZoneDetector
 
 logger = logging.getLogger(__name__)
 
@@ -34,42 +49,44 @@ logger = logging.getLogger(__name__)
 class PairState:
     coin: str
     structure: Optional[StructureState] = None
+    htf_trend: str = "ranging"
     last_candle_time: int = 0
     in_trade: bool = False
     trades_taken: int = 0
-    active_setup: Optional[TradeSetup] = None   # stored for paper SL/TP monitoring
-    breakeven_activated: bool = False            # True once SL has been moved to entry
+    active_setup: Optional[TradeSetup] = None
+    breakeven_activated: bool = False
+    last_ltf_df: Optional[pd.DataFrame] = None   # cached for trailing SL
 
 
 class StrategyEngine:
     """
-    Main engine — evaluates the SMA channel strategy on every new closed candle.
+    Main engine — evaluates the BOS/CHoCH supply & demand zone strategy
+    on every new closed 5m candle.
     """
 
     def __init__(
         self,
         config: Config,
         client: HyperliquidClient,
-        alert_callback=None,  # async callable(msg: str)
+        alert_callback=None,
     ):
         self.config = config
         self.client = client
         self.alert_callback = alert_callback
 
         self.ms_detector = MarketStructure(
-            sma_length=config.SMA_LENGTH,
             pivot_lookback=config.PIVOT_LOOKBACK,
-            trend_confirm_candles=config.TREND_CONFIRM_CANDLES,
             atr_length=config.ATR_LENGTH,
-            pullback_only=config.PULLBACK_ONLY,
-            volume_mult=config.VOLUME_MULT,
-            macro_ema_period=config.MACRO_EMA,
         )
 
-        # ── Circuit breaker state ──────────────────────────────
+        self.zone_detector = ZoneDetector(
+            swing_lookback=config.PIVOT_LOOKBACK,
+        )
+
         self._consecutive_losses: int = 0
-        self._peak_balance: float = config.PAPER_BALANCE  # tracks session high
-        self._paused_until: float = 0.0                   # unix timestamp
+        self._peak_balance: float = config.PAPER_BALANCE
+        self._paused_until: float = 0.0
+
         self.risk_manager = RiskManager(
             min_rr=config.MIN_RR,
             position_size_pct=config.POSITION_SIZE_PCT,
@@ -94,19 +111,19 @@ class StrategyEngine:
         self.running = True
         logger.info(
             f"Strategy engine started | pairs={self.config.PAIRS} "
-            f"| tf={self.config.TIMEFRAME} | rr_min={self.config.MIN_RR} "
-            f"| sma={self.config.SMA_LENGTH}"
+            f"| ltf={self.config.TIMEFRAME} | htf={self.config.HTF_TIMEFRAME}"
         )
         mode = "🧪 DRY RUN (paper trading)" if self.client.dry_run else (
             "⚠️ TESTNET" if self.config.HL_TESTNET else "🔴 MAINNET"
         )
         await self._alert(
-            f"🤖 *Bot started — SMA Channel Strategy*\n"
+            f"🤖 *Bot started — BOS/CHoCH Zone Strategy*\n"
             f"Mode: {mode}\n"
             f"Pairs: {', '.join(self.config.PAIRS)}\n"
-            f"Timeframe: {self.config.TIMEFRAME}\n"
-            f"SMA Length: {self.config.SMA_LENGTH}\n"
-            f"Min R:R: {self.config.MIN_RR}"
+            f"LTF (entry): {self.config.TIMEFRAME}\n"
+            f"HTF (trend): {self.config.HTF_TIMEFRAME}\n"
+            f"Min R:R: {self.config.MIN_RR}\n"
+            f"Risk/trade: {self.config.RISK_PER_TRADE_PCT*100:.1f}%"
         )
         await self._run_loop()
 
@@ -126,16 +143,12 @@ class StrategyEngine:
             except Exception as e:
                 logger.exception(f"Error in strategy loop: {e}")
                 await self._alert(f"⚠️ Strategy error: {e}")
-
             await asyncio.sleep(self._seconds_to_next_candle())
 
     async def _tick(self):
-        """Evaluate strategy for all pairs on the latest closed candle."""
-        # In paper mode, check whether any open position has hit SL/TP
         if self.client.dry_run:
             await self._check_paper_positions()
 
-        # Circuit breaker — skip new entries while paused
         if self._paused_until > time.time():
             remaining = (self._paused_until - time.time()) / 3600
             logger.info(f"Circuit breaker active — {remaining:.1f}h remaining")
@@ -147,81 +160,98 @@ class StrategyEngine:
             except Exception as e:
                 logger.error(f"Error processing {coin}: {e}")
 
+    # ──────────────────────────────────────────────────────────
+    # Per-pair logic
+    # ──────────────────────────────────────────────────────────
+
     async def _process_pair(self, coin: str):
         state = self.pair_states[coin]
 
-        # ── Fetch candles ──────────────────────────────────────
-        df = self.client.get_candles(coin, self.config.TIMEFRAME, self.config.CANDLE_LIMIT)
-        if df.empty or len(df) < self.config.SMA_LENGTH + self.config.PIVOT_LOOKBACK * 2 + 5:
-            logger.debug(f"{coin}: insufficient candle data")
+        # ── Fetch LTF candles (5m) ─────────────────────────────
+        df_ltf = self.client.get_candles(coin, self.config.TIMEFRAME, self.config.CANDLE_LIMIT)
+        if df_ltf.empty or len(df_ltf) < self.config.PIVOT_LOOKBACK * 3 + 30:
+            logger.debug(f"{coin}: insufficient LTF candle data")
             return
 
-        # Work on CLOSED candles only (drop the in-progress candle)
-        df = df.iloc[:-1].reset_index(drop=True)
+        # Drop the in-progress candle — strategy runs on CLOSED candles only
+        df_ltf = df_ltf.iloc[:-1].reset_index(drop=True)
 
-        # Deduplicate: skip if we already processed this candle
-        latest_ts = int(df["timestamp"].iloc[-1])
+        # Dedup: skip if this candle was already processed
+        latest_ts = int(df_ltf["timestamp"].iloc[-1])
         if latest_ts == state.last_candle_time:
             return
         state.last_candle_time = latest_ts
 
-        # ── Step 1 + 2: Trend + Entry signals ─────────────────
-        structure = self.ms_detector.analyse(df)
-        state.structure = structure
+        # Cache the LTF df for use by the trailing SL in paper mode
+        state.last_ltf_df = df_ltf
 
-        logger.debug(
-            f"{coin} | trend={structure.trend} "
-            f"| upper_sma={structure.upper_sma:.2f} "
-            f"| lower_sma={structure.lower_sma:.2f} "
-            f"| breakout_long={structure.breakout_long} "
-            f"| pullback_long={structure.pullback_long} "
-            f"| breakout_short={structure.breakout_short} "
-            f"| pullback_short={structure.pullback_short}"
+        # ── Fetch HTF candles (1h) ─────────────────────────────
+        df_htf = self.client.get_candles(
+            coin, self.config.HTF_TIMEFRAME, self.config.HTF_CANDLE_LIMIT
         )
+        if df_htf.empty or len(df_htf) < self.config.PIVOT_LOOKBACK * 3 + 10:
+            logger.debug(f"{coin}: insufficient HTF candle data")
+            return
+        df_htf = df_htf.iloc[:-1].reset_index(drop=True)
 
-        if structure.trend == "ranging":
-            return  # No trades inside the channel
+        # ── Step 1: HTF trend (primary filter) ────────────────
+        htf_state = self.ms_detector.analyse(df_htf)
+        state.htf_trend = htf_state.trend
 
-        # Determine side and whether any entry signal is active
-        if structure.trend == "bullish" and structure.has_long_signal:
-            side = "long"
-            signal_type = "breakout" if structure.breakout_long else "pullback"
-        elif structure.trend == "bearish" and structure.has_short_signal:
-            side = "short"
-            signal_type = "breakout" if structure.breakout_short else "pullback"
-        else:
-            return  # No signal this candle
-
-        # Use the exchange/paper position as source of truth so that
-        # externally-closed positions don't block new signals forever.
-        if self.client.has_open_position(coin):
-            logger.debug(f"{coin}: already in trade, skipping signal")
+        if htf_state.trend == "ranging":
+            logger.debug(f"{coin}: HTF ranging — skip")
             return
 
+        # ── Step 2: LTF structure ─────────────────────────────
+        ltf_state = self.ms_detector.analyse(df_ltf)
+        state.structure = ltf_state
+
+        # LTF must agree with HTF — misaligned = no trade
+        if ltf_state.trend != "ranging" and ltf_state.trend != htf_state.trend:
+            logger.debug(
+                f"{coin}: HTF={htf_state.trend} LTF={ltf_state.trend} — misaligned, skip"
+            )
+            return
+
+        # Use HTF trend as the authoritative direction
+        side = "long" if htf_state.trend == "bullish" else "short"
+        trend = htf_state.trend
+
+        # ── Step 3: Find BOS/CHoCH-validated zones on LTF ─────
+        # find_zones returns only active zones where the impulse caused a BOS/CHoCH
+        zones = self.zone_detector.find_zones(df_ltf, trend)
+
+        logger.debug(
+            f"{coin} | htf={htf_state.trend} | ltf={ltf_state.trend} "
+            f"| zones={len(zones)}"
+        )
+
+        # ── Step 4: Check if current price is inside a valid zone ──
         current_price = self.client.get_current_price(coin)
         if not current_price:
             return
 
-        # ── Step 3: R:R filter ─────────────────────────────────
-        balance = self.client.get_account_balance()
+        active_zone = self.zone_detector.price_in_zone(current_price, zones)
+        if not active_zone:
+            return
 
-        # Last closed candle's extreme — used for tighter SL placement
-        signal_candle_low = float(df["low"].iloc[-1])
-        signal_candle_high = float(df["high"].iloc[-1])
+        # Already in a trade — don't stack
+        if self.client.has_open_position(coin):
+            logger.debug(f"{coin}: already in trade, skipping zone signal")
+            return
+
+        # ── Step 5 + 6: Build trade setup ─────────────────────
+        balance = self.client.get_account_balance()
 
         setup = self.risk_manager.evaluate(
             coin=coin,
             side=side,
             current_price=current_price,
-            upper_sma=structure.upper_sma,
-            lower_sma=structure.lower_sma,
-            recent_swing_high=structure.recent_swing_high,
-            recent_swing_low=structure.recent_swing_low,
+            zone=active_zone,
+            recent_swing_high=ltf_state.recent_swing_high,
+            recent_swing_low=ltf_state.recent_swing_low,
             account_balance=balance,
-            signal_type=signal_type,
-            signal_candle_low=signal_candle_low,
-            signal_candle_high=signal_candle_high,
-            atr=structure.atr,
+            atr=ltf_state.atr,
         )
 
         if setup is None:
@@ -229,17 +259,17 @@ class StrategyEngine:
             return
 
         await self._alert(
-            f"📊 *{coin} Signal Detected*\n{setup.summary()}"
+            f"📊 *{coin} Zone Signal*\n"
+            f"  HTF: {htf_state.trend.upper()} | LTF: {ltf_state.trend.upper()}\n"
+            f"{setup.summary()}"
         )
 
         if not setup.approved:
-            logger.info(
-                f"{coin}: R:R {setup.rr_ratio} < {self.config.MIN_RR} — trade rejected"
-            )
+            logger.info(f"{coin}: R:R {setup.rr_ratio} < {self.config.MIN_RR} — rejected")
             return
 
-        # ── Execute trade ──────────────────────────────────────
-        logger.info(f"Executing {side.upper()} trade on {coin} | R:R={setup.rr_ratio}")
+        # ── Execute ────────────────────────────────────────────
+        logger.info(f"Executing {side.upper()} on {coin} | R:R={setup.rr_ratio}")
         success = self.client.enter_trade(
             coin=coin,
             side=side,
@@ -251,6 +281,7 @@ class StrategyEngine:
         if success:
             state.in_trade = True
             state.active_setup = setup
+            state.breakeven_activated = False
             state.trades_taken += 1
             label = (
                 f"🧪 *Paper Trade — {coin}*"
@@ -267,11 +298,13 @@ class StrategyEngine:
 
     async def _check_paper_positions(self):
         """
-        Poll current prices and:
-          1. Move SL to breakeven once BREAKEVEN_AT_R profit is reached.
-          2. Auto-close when SL or TP is hit.
-          3. Update circuit breaker on close.
-        Only runs in dry_run mode — live positions use exchange trigger orders.
+        Each tick:
+          1. Breakeven: move SL to entry once BREAKEVEN_AT_R profit is reached.
+          2. Trail SL: after breakeven, trail SL to the latest confirmed swing
+             low (long) or swing high (short) on the LTF — letting the trade
+             run with the trend.
+          3. Close: if SL or TP is hit.
+          4. Circuit breaker: update on close.
         """
         for coin, state in self.pair_states.items():
             if not state.in_trade or not state.active_setup:
@@ -284,25 +317,30 @@ class StrategyEngine:
             setup = state.active_setup
             risk = abs(setup.entry - setup.stop_loss)
 
-            # ── Breakeven stop ────────────────────────────────
+            # ── Breakeven ─────────────────────────────────────
             be_r = self.config.BREAKEVEN_AT_R
             if be_r > 0 and not state.breakeven_activated:
-                if setup.side == "long" and price >= setup.entry + be_r * risk:
+                triggered = (
+                    (setup.side == "long" and price >= setup.entry + be_r * risk)
+                    or
+                    (setup.side == "short" and price <= setup.entry - be_r * risk)
+                )
+                if triggered:
                     setup.stop_loss = setup.entry
                     state.breakeven_activated = True
                     await self._alert(
                         f"🔒 *Breakeven — {coin}*\n"
-                        f"  SL moved to entry ${setup.entry:,.4f} at {price:,.4f}"
-                    )
-                elif setup.side == "short" and price <= setup.entry - be_r * risk:
-                    setup.stop_loss = setup.entry
-                    state.breakeven_activated = True
-                    await self._alert(
-                        f"🔒 *Breakeven — {coin}*\n"
-                        f"  SL moved to entry ${setup.entry:,.4f} at {price:,.4f}"
+                        f"  SL moved to entry ${setup.entry:,.4f}"
                     )
 
-            # ── Check SL / TP ─────────────────────────────────
+            # ── Trail SL after breakeven ──────────────────────
+            # Once breakeven is active, trail the SL to each new confirmed
+            # swing low (long) / swing high (short) so the trade runs with
+            # the trend rather than closing at a fixed TP.
+            if state.breakeven_activated and state.last_ltf_df is not None:
+                self._trail_sl(state, price)
+
+            # ── SL / TP check ─────────────────────────────────
             outcome: Optional[str] = None
             if setup.side == "long":
                 if price <= setup.stop_loss:
@@ -324,19 +362,15 @@ class StrategyEngine:
             state.breakeven_activated = False
 
             balance = self.client.get_account_balance()
-
-            # ── Update peak balance ────────────────────────────
             if balance > self._peak_balance:
                 self._peak_balance = balance
 
-            # ── Circuit breaker tracking ───────────────────────
             if outcome == "win":
                 self._consecutive_losses = 0
                 icon, rr_label = "✅", f"+{setup.rr_ratio:.2f}R"
             elif outcome == "breakeven":
-                # Breakeven doesn't reset or increment the loss counter
                 icon, rr_label = "🔄", "±0.00R (breakeven)"
-            else:  # loss
+            else:
                 self._consecutive_losses += 1
                 icon, rr_label = "❌", "-1.00R"
 
@@ -351,22 +385,62 @@ class StrategyEngine:
                 f"[PAPER] {coin} closed — {outcome} | {rr_label} | "
                 f"balance=${balance:,.2f}"
             )
-
-            # ── Trigger circuit breaker if needed ─────────────
             await self._check_circuit_breaker(balance)
+
+    def _trail_sl(self, state: PairState, current_price: float):
+        """
+        After breakeven is activated, move SL up (long) or down (short) to
+        the most recent confirmed swing low / swing high on the LTF.
+
+        This lets the trade run with the trend — SL only ratchets in one
+        direction (toward profit), never backwards.
+        """
+        setup = state.active_setup
+        df = state.last_ltf_df
+        if df is None or setup is None:
+            return
+
+        lb = self.config.PIVOT_LOOKBACK
+        col = "low" if setup.side == "long" else "high"
+        agg_fn = min if setup.side == "long" else max
+
+        # Find the most recent confirmed swing low (long) or high (short)
+        best_swing: Optional[float] = None
+        for i in range(lb, len(df) - lb):
+            window = df[col].iloc[i - lb: i + lb + 1]
+            if float(df[col].iloc[i]) == float(agg_fn(window)):
+                best_swing = float(df[col].iloc[i])
+                # Keep scanning to find the latest (most recent)
+
+        if best_swing is None:
+            return
+
+        buffer = self.config.SL_BUFFER
+        if setup.side == "long":
+            # Trail SL up to the latest swing low — but only if it's higher than
+            # current SL and still below entry (don't go past entry on trail)
+            new_sl = best_swing * (1.0 - buffer)
+            if new_sl > setup.stop_loss and new_sl < setup.entry:
+                logger.debug(
+                    f"[TRAIL] {state.coin} long SL {setup.stop_loss:.4f} → {new_sl:.4f}"
+                )
+                setup.stop_loss = new_sl
+        else:
+            # Trail SL down to the latest swing high
+            new_sl = best_swing * (1.0 + buffer)
+            if new_sl < setup.stop_loss and new_sl > setup.entry:
+                logger.debug(
+                    f"[TRAIL] {state.coin} short SL {setup.stop_loss:.4f} → {new_sl:.4f}"
+                )
+                setup.stop_loss = new_sl
 
     # ──────────────────────────────────────────────────────────
     # Circuit breaker
     # ──────────────────────────────────────────────────────────
 
     async def _check_circuit_breaker(self, balance: float):
-        """
-        Pause new entries for CIRCUIT_PAUSE_HOURS if either condition is met:
-          - CONSECUTIVE_LOSS_LIMIT consecutive losses in a row, OR
-          - Balance has dropped MAX_DAILY_LOSS_PCT below the session peak.
-        """
         if self._paused_until > time.time():
-            return  # already paused
+            return
 
         reason = None
         limit = self.config.CONSECUTIVE_LOSS_LIMIT
@@ -386,38 +460,24 @@ class StrategyEngine:
             await self._alert(
                 f"🛑 *Circuit Breaker Triggered*\n"
                 f"  Reason:  {reason}\n"
-                f"  Pausing: {self.config.CIRCUIT_PAUSE_HOURS:.0f}h — no new entries\n"
+                f"  Pausing: {self.config.CIRCUIT_PAUSE_HOURS:.0f}h\n"
                 f"  Balance: ${balance:,.2f}"
             )
-            logger.warning(f"Circuit breaker triggered: {reason} — paused {self.config.CIRCUIT_PAUSE_HOURS}h")
+            logger.warning(f"Circuit breaker triggered: {reason}")
 
     # ──────────────────────────────────────────────────────────
     # Status helpers (used by Telegram bot)
     # ──────────────────────────────────────────────────────────
 
     def get_status_text(self) -> str:
-        lines = ["*SMA Channel Strategy Status*\n"]
+        lines = ["*BOS/CHoCH Zone Strategy Status*\n"]
         for coin, state in self.pair_states.items():
-            if state.structure:
-                trend = state.structure.trend
-                upper = f"{state.structure.upper_sma:.2f}"
-                lower = f"{state.structure.lower_sma:.2f}"
-                signals = []
-                if state.structure.breakout_long:
-                    signals.append("BO-Long")
-                if state.structure.pullback_long:
-                    signals.append("PB-Long")
-                if state.structure.breakout_short:
-                    signals.append("BO-Short")
-                if state.structure.pullback_short:
-                    signals.append("PB-Short")
-                sig_str = ", ".join(signals) if signals else "none"
-            else:
-                trend, upper, lower, sig_str = "unknown", "-", "-", "none"
-
+            ltf_trend = state.structure.trend if state.structure else "unknown"
+            htf_trend = state.htf_trend
+            trade_str = "IN TRADE" if state.in_trade else "watching"
             lines.append(
-                f"*{coin}*: trend=`{trend}` | sma=[{lower}–{upper}] | "
-                f"signal={sig_str} | trades={state.trades_taken}"
+                f"*{coin}*: htf=`{htf_trend}` | ltf=`{ltf_trend}` | "
+                f"{trade_str} | trades={state.trades_taken}"
             )
         return "\n".join(lines)
 
@@ -433,7 +493,6 @@ class StrategyEngine:
                 logger.error(f"Failed to send alert: {e}")
 
     def _seconds_to_next_candle(self) -> float:
-        """Sleep until the next candle closes (aligned to timeframe)."""
         now = time.time()
         remainder = now % self._interval_seconds
         return self._interval_seconds - remainder + 2  # +2s buffer

@@ -18,31 +18,27 @@ class Config:
     # All six pairs are actively traded on Hyperliquid with sufficient liquidity.
     # Add or remove via PAIRS env var, e.g. PAIRS=BTC,ETH,SOL
     PAIRS: list[str] = [p.strip() for p in os.getenv("PAIRS", "BTC,ETH,SOL,AVAX,LINK,DOGE").split(",")]
-    TIMEFRAME: str = os.getenv("TIMEFRAME", "5m")
+    TIMEFRAME: str = os.getenv("TIMEFRAME", "5m")          # LTF entry timeframe
+    HTF_TIMEFRAME: str = os.getenv("HTF_TIMEFRAME", "1h")  # HTF trend filter (higher weight)
     POSITION_SIZE_PCT: float = float(os.getenv("POSITION_SIZE_PCT", "0.10"))  # legacy fallback
     RISK_PER_TRADE_PCT: float = float(os.getenv("RISK_PER_TRADE_PCT", "0.01"))  # 1% balance at risk per trade
     MAX_POSITION_PCT: float = float(os.getenv("MAX_POSITION_PCT", "0.25"))    # cap at 25% of balance
     MIN_RR: float = float(os.getenv("MIN_RR", "2.5"))
     PIVOT_LOOKBACK: int = int(os.getenv("PIVOT_LOOKBACK", "10"))
 
-    # ── SMA Channel ────────────────────────────────────────────
-    SMA_LENGTH: int = int(os.getenv("SMA_LENGTH", "20"))
+    # ── SL buffer ──────────────────────────────────────────────
+    # Small buffer placed outside zone boundaries for SL.
     SL_BUFFER: float = float(os.getenv("SL_BUFFER", "0.001"))
 
-    # ── ATR-based stop loss ────────────────────────────────────
-    # SL is placed ATR_SL_MULT × ATR(ATR_LENGTH) from entry.
-    # Adapts to actual volatility — stops won't get hit by normal candle noise.
+    # ── ATR (fallback SL and structural reference) ─────────────
     ATR_LENGTH: int = int(os.getenv("ATR_LENGTH", "14"))
     ATR_SL_MULT: float = float(os.getenv("ATR_SL_MULT", "1.5"))
 
-    # ── Signal filters ─────────────────────────────────────────
+    # ── Legacy SMA Channel params (kept so backtester init doesn't break) ──
+    SMA_LENGTH: int = int(os.getenv("SMA_LENGTH", "20"))
     TREND_CONFIRM_CANDLES: int = int(os.getenv("TREND_CONFIRM_CANDLES", "5"))
     PULLBACK_ONLY: bool = os.getenv("PULLBACK_ONLY", "true").lower() == "true"
-    # Volume gate — 0 = disabled, 1.2 = must be 20% above avg. Disabled by
-    # default: added no edge but cut valid setups on 5m charts.
     VOLUME_MULT: float = float(os.getenv("VOLUME_MULT", "0"))
-    # Macro EMA — 0 = disabled. Disabled by default: caused inverted filtering
-    # on pullback entries (price is naturally below the EMA during the dip).
     MACRO_EMA: int = int(os.getenv("MACRO_EMA", "0"))
 
     # ── Trade management ───────────────────────────────────────
@@ -65,8 +61,10 @@ class Config:
     PAPER_BALANCE: float = float(os.getenv("PAPER_BALANCE", "10000.0"))
 
     # ── Candle history ─────────────────────────────────────────
-    # How many candles to load for structure analysis
-    CANDLE_LIMIT: int = 200
+    # LTF: 300 candles gives ~25h of 5m data for swing + zone detection
+    # HTF: 150 candles gives ~6 days of 1h data for trend classification
+    CANDLE_LIMIT: int = 300
+    HTF_CANDLE_LIMIT: int = int(os.getenv("HTF_CANDLE_LIMIT", "150"))
 
     def validate(self) -> list[str]:
         """Return list of missing/invalid config values."""
@@ -83,4 +81,6 @@ class Config:
                 errors.append("HL_WALLET_ADDRESS is not set (set DRY_RUN=true to skip)")
         if self.TIMEFRAME not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h"):
             errors.append(f"TIMEFRAME '{self.TIMEFRAME}' is not valid")
+        if self.HTF_TIMEFRAME not in ("15m", "30m", "1h", "4h", "1d"):
+            errors.append(f"HTF_TIMEFRAME '{self.HTF_TIMEFRAME}' is not valid")
         return errors

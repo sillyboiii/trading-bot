@@ -1,26 +1,21 @@
 """
 Risk Manager
 ============
-SMA Channel strategy risk rules:
+Zone-based Stop Loss (new strategy):
+  Long  → SL placed just BELOW the demand zone_low  (entry - SL_BUFFER × zone_low)
+  Short → SL placed just ABOVE the supply zone_high (entry + SL_BUFFER × zone_high)
 
-Stop Loss (ATR-based):
-  Long  → entry - ATR_SL_MULT × ATR(14)
-  Short → entry + ATR_SL_MULT × ATR(14)
-  The ATR floor ensures the SL is never hit by normal intraday noise.
+  The zone boundary IS the invalidation level.  If price closes below a demand
+  zone it's no longer a valid demand zone, so SL sits right there.
 
-Take Profit:
-  Primary  → recent swing high (long) / swing low (short) if R:R ≥ MIN_RR
+Take Profit (trailing with trend):
+  Primary  → next confirmed swing high (long) / swing low (short) if R:R ≥ MIN_RR
   Fallback → fixed MIN_RR multiple from entry
 
-Position Sizing (risk-based):
+Position Sizing (risk-based, unchanged):
   Dollar risk per trade = account_balance × RISK_PER_TRADE_PCT  (default 1%)
   Position size (coin)  = dollar_risk / (entry − stop_loss)
-  This means the same fraction of capital is lost on every losing trade
-  regardless of ATR, price, or timeframe — the system automatically sizes
-  up in low-volatility regimes and down in high-volatility regimes.
-  Capped at MAX_POSITION_PCT × balance to prevent over-sizing.
-
-Minimum R:R: 2.5 : 1  (default)
+  Capped at MAX_POSITION_PCT × balance.
 """
 
 from dataclasses import dataclass
@@ -39,17 +34,20 @@ class TradeSetup:
     rr_ratio: float
     position_size_usd: float
     position_size_coin: float
-    signal_type: str        # 'breakout' | 'pullback'
+    signal_type: str        # 'zone_demand' | 'zone_supply'
     approved: bool          # True only if rr_ratio >= MIN_RR
+    zone_high: float = 0.0  # zone boundaries stored for trailing reference
+    zone_low: float = 0.0
 
     def summary(self) -> str:
         status = "✅ APPROVED" if self.approved else "❌ REJECTED (R:R too low)"
-        sig = "📈 Breakout" if self.signal_type == "breakout" else "🔄 Pullback"
+        icon = "🟢 Demand Zone" if self.signal_type == "zone_demand" else "🔴 Supply Zone"
         return (
-            f"{status} | {sig}\n"
+            f"{status} | {icon}\n"
             f"  Coin:   {self.coin}\n"
             f"  Side:   {self.side.upper()}\n"
             f"  Entry:  ${self.entry:,.4f}\n"
+            f"  Zone:   ${self.zone_low:,.4f} – ${self.zone_high:,.4f}\n"
             f"  SL:     ${self.stop_loss:,.4f}\n"
             f"  TP:     ${self.take_profit:,.4f}\n"
             f"  R:R:    {self.rr_ratio:.2f}:1\n"
@@ -64,9 +62,9 @@ class RiskManager:
         min_rr: float = 2.5,
         position_size_pct: float = 0.10,     # legacy — only used if risk_per_trade_pct=0
         sl_buffer: float = 0.001,
-        atr_sl_mult: float = 1.5,
-        risk_per_trade_pct: float = 0.01,    # fraction of balance to risk per trade
-        max_position_pct: float = 0.25,      # max fraction of balance in one position
+        atr_sl_mult: float = 1.5,            # kept for ATR fallback when no zone
+        risk_per_trade_pct: float = 0.01,
+        max_position_pct: float = 0.25,
     ):
         self.min_rr = min_rr
         self.position_size_pct = position_size_pct
@@ -84,27 +82,46 @@ class RiskManager:
         coin: str,
         side: str,
         current_price: float,
-        upper_sma: float,
-        lower_sma: float,
         recent_swing_high: Optional[SwingPoint],
         recent_swing_low: Optional[SwingPoint],
         account_balance: float,
-        signal_type: str = "pullback",
+        atr: float = 0.0,
+        # Zone-based SL (preferred)
+        zone=None,                          # Optional[Zone]
+        # Legacy fallback params (used by backtester when no zone)
+        upper_sma: float = 0.0,
+        lower_sma: float = 0.0,
+        signal_type: str = "zone_demand",
         signal_candle_low: Optional[float] = None,
         signal_candle_high: Optional[float] = None,
-        atr: float = 0.0,
     ) -> Optional["TradeSetup"]:
         """
         Build and evaluate a trade setup.
+
+        When a zone is provided (live strategy), SL is placed at the zone
+        boundary.  Without a zone (backtester fallback), ATR-based SL is used.
 
         Returns None if a valid setup cannot be constructed.
         Returns TradeSetup with approved=False if R:R < MIN_RR.
         """
         entry = current_price
 
-        # ── Stop Loss (ATR-based) ─────────────────────────────
-        sl = self._calc_sl(side, entry, upper_sma, lower_sma,
-                           signal_candle_low, signal_candle_high, atr)
+        # ── Stop Loss ─────────────────────────────────────────
+        if zone is not None:
+            sl = self._calc_sl_from_zone(side, zone)
+            zone_high = zone.zone_high
+            zone_low = zone.zone_low
+            sig_type = "zone_demand" if side == "long" else "zone_supply"
+        else:
+            # Fallback: ATR-based (used by backtester)
+            sl = self._calc_sl_atr_fallback(
+                side, entry, upper_sma, lower_sma,
+                signal_candle_low, signal_candle_high, atr
+            )
+            zone_high = upper_sma
+            zone_low = lower_sma
+            sig_type = signal_type
+
         if sl is None:
             return None
 
@@ -117,12 +134,10 @@ class RiskManager:
         if tp is None:
             return None
 
-        # ── R:R ───────────────────────────────────────────────
         rr = self._calc_rr(side, entry, sl, tp)
         if rr <= 0:
             return None
 
-        # ── Position size (risk-based) ─────────────────────────
         pos_usd, pos_coin = self._calc_position(account_balance, entry, risk)
 
         return TradeSetup(
@@ -134,15 +149,28 @@ class RiskManager:
             rr_ratio=round(rr, 2),
             position_size_usd=round(pos_usd, 2),
             position_size_coin=round(pos_coin, 6),
-            signal_type=signal_type,
+            signal_type=sig_type,
             approved=rr >= self.min_rr,
+            zone_high=round(zone_high, 6),
+            zone_low=round(zone_low, 6),
         )
 
     # ──────────────────────────────────────────────────────────
-    # Internal helpers
+    # Stop loss
     # ──────────────────────────────────────────────────────────
 
-    def _calc_sl(
+    def _calc_sl_from_zone(self, side: str, zone) -> float:
+        """
+        Place SL just outside the zone boundary with a small buffer.
+          Long  (demand zone): SL = zone_low  × (1 − sl_buffer)
+          Short (supply zone): SL = zone_high × (1 + sl_buffer)
+        """
+        if side == "long":
+            return zone.zone_low * (1.0 - self.sl_buffer)
+        else:
+            return zone.zone_high * (1.0 + self.sl_buffer)
+
+    def _calc_sl_atr_fallback(
         self,
         side: str,
         entry: float,
@@ -152,83 +180,31 @@ class RiskManager:
         signal_candle_high: Optional[float],
         atr: float,
     ) -> Optional[float]:
-        """
-        Compute stop loss using the tightest of:
-          1. ATR-based distance  (entry ± ATR_SL_MULT × ATR)
-          2. SMA-based level     (lower_sma for longs, upper_sma for shorts)
-
-        Tighter is safer — it gives a smaller R amount so TP targets are
-        proportionally closer too, but avoids the SMA-based SL being hit
-        by random noise on short timeframes.
-        """
+        """ATR-based SL used as a fallback when no zone is available (backtester)."""
         if side == "long":
-            # ATR floor: place SL at entry - atr_sl_mult × ATR
             atr_sl = (entry - self.atr_sl_mult * atr) if atr > 0 else None
-            # SMA fallback
-            sma_sl = lower_sma * (1 - self.sl_buffer)
-            # Signal candle tighter alternative
-            candle_sl = (
-                signal_candle_low * (1 - self.sl_buffer)
-                if signal_candle_low else None
-            )
+            sma_sl = lower_sma * (1 - self.sl_buffer) if lower_sma > 0 else None
+            candle_sl = signal_candle_low * (1 - self.sl_buffer) if signal_candle_low else None
 
-            # Candidates: take the highest (tightest to entry) that is still
-            # below entry, and is >= the ATR floor if ATR is available.
-            candidates = [c for c in [atr_sl, sma_sl, candle_sl]
-                          if c is not None and c < entry]
-            if not candidates:
-                return None
-
-            if atr_sl is not None:
-                # Use ATR level as the SL — it's already volatility-scaled.
-                # Ignore candle/SMA alternatives to keep SL consistent.
+            if atr_sl is not None and atr_sl < entry:
                 return atr_sl
-            return max(candidates)  # tightest that is below entry
 
-        else:  # short
+            candidates = [c for c in [sma_sl, candle_sl] if c is not None and c < entry]
+            return max(candidates) if candidates else None
+        else:
             atr_sl = (entry + self.atr_sl_mult * atr) if atr > 0 else None
-            sma_sl = upper_sma * (1 + self.sl_buffer)
-            candle_sl = (
-                signal_candle_high * (1 + self.sl_buffer)
-                if signal_candle_high else None
-            )
-            candidates = [c for c in [atr_sl, sma_sl, candle_sl]
-                          if c is not None and c > entry]
-            if not candidates:
-                return None
-            if atr_sl is not None:
+            sma_sl = upper_sma * (1 + self.sl_buffer) if upper_sma > 0 else None
+            candle_sl = signal_candle_high * (1 + self.sl_buffer) if signal_candle_high else None
+
+            if atr_sl is not None and atr_sl > entry:
                 return atr_sl
-            return min(candidates)  # tightest above entry
 
-    def _calc_position(
-        self,
-        account_balance: float,
-        entry: float,
-        sl_distance: float,
-    ) -> tuple[float, float]:
-        """
-        Risk-based sizing: risk exactly RISK_PER_TRADE_PCT of balance per trade.
+            candidates = [c for c in [sma_sl, candle_sl] if c is not None and c > entry]
+            return min(candidates) if candidates else None
 
-        position_coin = dollar_risk / sl_distance
-        position_usd  = position_coin × entry
-        Capped at MAX_POSITION_PCT × balance.
-        """
-        dollar_risk = account_balance * self.risk_per_trade_pct
-        if sl_distance <= 0 or entry <= 0:
-            # Fallback to legacy flat sizing
-            pos_usd = account_balance * self.position_size_pct
-            return pos_usd, pos_usd / entry
-
-        pos_coin = dollar_risk / sl_distance
-        pos_usd = pos_coin * entry
-
-        # Cap at max_position_pct of balance
-        max_usd = account_balance * self.max_position_pct
-        if pos_usd > max_usd:
-            pos_usd = max_usd
-            pos_coin = max_usd / entry
-
-        return pos_usd, pos_coin
+    # ──────────────────────────────────────────────────────────
+    # Take profit
+    # ──────────────────────────────────────────────────────────
 
     def _choose_tp(
         self,
@@ -239,14 +215,14 @@ class RiskManager:
         recent_swing_low: Optional[SwingPoint],
     ) -> Optional[float]:
         """
-        Select take profit:
-        1. Use the recent swing high (long) / swing low (short) if it meets min_rr.
-        2. Fall back to a fixed min_rr multiple.
+        Take profit target:
+          1. Next confirmed swing high (long) / swing low (short) if R:R ≥ MIN_RR.
+             This lets the trade run to a natural structure level.
+          2. Fixed MIN_RR multiple from entry as fallback.
         """
         risk = abs(entry - sl)
         fixed_tp = (
-            entry + self.min_rr * risk
-            if side == "long"
+            entry + self.min_rr * risk if side == "long"
             else entry - self.min_rr * risk
         )
 
@@ -256,13 +232,45 @@ class RiskManager:
                 if swing_rr >= self.min_rr:
                     return recent_swing_high.price
             return fixed_tp
-
-        else:  # short
+        else:
             if recent_swing_low and recent_swing_low.price < entry:
                 swing_rr = (entry - recent_swing_low.price) / risk
                 if swing_rr >= self.min_rr:
                     return recent_swing_low.price
             return fixed_tp
+
+    # ──────────────────────────────────────────────────────────
+    # Position sizing
+    # ──────────────────────────────────────────────────────────
+
+    def _calc_position(
+        self,
+        account_balance: float,
+        entry: float,
+        sl_distance: float,
+    ) -> tuple[float, float]:
+        """
+        Risk exactly RISK_PER_TRADE_PCT of balance per trade.
+        Capped at MAX_POSITION_PCT × balance.
+        """
+        dollar_risk = account_balance * self.risk_per_trade_pct
+        if sl_distance <= 0 or entry <= 0:
+            pos_usd = account_balance * self.position_size_pct
+            return pos_usd, pos_usd / entry
+
+        pos_coin = dollar_risk / sl_distance
+        pos_usd = pos_coin * entry
+
+        max_usd = account_balance * self.max_position_pct
+        if pos_usd > max_usd:
+            pos_usd = max_usd
+            pos_coin = max_usd / entry
+
+        return pos_usd, pos_coin
+
+    # ──────────────────────────────────────────────────────────
+    # R:R
+    # ──────────────────────────────────────────────────────────
 
     def _calc_rr(self, side: str, entry: float, sl: float, tp: float) -> float:
         if side == "long":
